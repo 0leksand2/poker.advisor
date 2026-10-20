@@ -19,6 +19,7 @@ public sealed class TableState
     public string SummaryLine { get; init; } = string.Empty;
     public long? PotAmount { get; set; }
     public string? PotRawText { get; set; }
+    public HeroRecommendation? Recommendation { get; set; }
 
     public IEnumerable<PanelLine> FormatPanelLines()
     {
@@ -38,13 +39,18 @@ public sealed class TableState
         yield return new PanelLine(
             $"hero: {heroCards} - {HeroPosition ?? "?"} | bank: {FormatAmount(hero?.BankAmount, hero?.BankRawText)} | bet: {FormatAmount(hero?.BetAmount, hero?.BetRawText)}");
 
+        if (Recommendation is not null)
+        {
+            yield return new PanelLine(Recommendation.ToPanelText(), Recommendation.Tone);
+        }
+
         foreach (var player in PlayersClockwiseFromHero.Skip(1))
         {
             var isFold = player.Status == PlayerStatus.Folded;
             var kind = isFold ? "fold_player" : "active_player";
             yield return new PanelLine(
                 $"{kind} - {player.Position} | bank: {FormatAmount(player.BankAmount, player.BankRawText)} | bet: {FormatAmount(player.BetAmount, player.BetRawText)}",
-                IsFold: isFold);
+                isFold ? PanelTone.Fold : PanelTone.Normal);
         }
     }
 

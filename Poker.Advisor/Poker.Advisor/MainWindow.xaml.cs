@@ -5,7 +5,9 @@ using System.Windows.Forms;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
+using Poker.Advisor.Core.Enums;
 using Poker.Advisor.Core.Models;
+using Poker.Advisor.Core.Recommendations;
 using Poker.Advisor.Services;
 using MediaBrushes = System.Windows.Media.Brushes;
 using MediaColor = System.Windows.Media.Color;
@@ -31,6 +33,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _timer;
     private readonly TableStateMachine _tableStateMachine = new();
     private readonly AmountOcrService _amountOcr = new();
+    private readonly HeroRecommendationService _recommendations = HeroRecommendationService.CreateDefault();
     private PythonPredictor? _predictor;
     private CancellationTokenSource? _loopCts;
     private Canvas _frontCanvas = null!;
@@ -151,6 +154,8 @@ public partial class MainWindow : Window
                 await _amountOcr.EnrichAsync(tableStates, detections, frame.Bitmap).ConfigureAwait(true);
             }
 
+            _recommendations.Apply(tableStates);
+
             await Dispatcher.InvokeAsync(
                 () =>
                 {
@@ -235,8 +240,16 @@ public partial class MainWindow : Window
 
         var normalBrush = new SolidColorBrush(MediaColor.FromRgb(0xF0, 0xF0, 0xF0));
         var foldBrush = new SolidColorBrush(MediaColor.FromRgb(0x9A, 0x9A, 0x9A));
+        var raiseBrush = new SolidColorBrush(MediaColor.FromRgb(0x39, 0xFF, 0x14)); // bright green
+        var callBrush = new SolidColorBrush(MediaColor.FromRgb(0x22, 0xC5, 0x5E)); // green
+        var adviceFoldBrush = new SolidColorBrush(MediaColor.FromRgb(0xFF, 0x3B, 0x30)); // red
+        var checkBrush = new SolidColorBrush(MediaColor.FromRgb(0xFF, 0xD6, 0x0A)); // yellow
         normalBrush.Freeze();
         foldBrush.Freeze();
+        raiseBrush.Freeze();
+        callBrush.Freeze();
+        adviceFoldBrush.Freeze();
+        checkBrush.Freeze();
 
         for (var t = 0; t < tableStates.Count; t++)
         {
@@ -250,10 +263,19 @@ public partial class MainWindow : Window
             {
                 var line = lines[i];
                 var suffix = i < lines.Count - 1 ? "\n" : string.Empty;
+                var brush = line.Tone switch
+                {
+                    PanelTone.Fold => foldBrush,
+                    PanelTone.AdviceRaise => raiseBrush,
+                    PanelTone.AdviceCall => callBrush,
+                    PanelTone.AdviceFold => adviceFoldBrush,
+                    PanelTone.AdviceCheck => checkBrush,
+                    _ => normalBrush,
+                };
                 TableStateText.Inlines.Add(
                     new System.Windows.Documents.Run(line.Text + suffix)
                     {
-                        Foreground = line.IsFold ? foldBrush : normalBrush,
+                        Foreground = brush,
                     });
             }
         }

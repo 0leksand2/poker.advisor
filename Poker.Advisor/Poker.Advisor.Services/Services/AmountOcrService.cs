@@ -193,55 +193,137 @@ public sealed class AmountOcrService : IDisposable
             player.BetRawText = null;
         }
 
-        var maxDist = Math.Max(table.Table.Width(), table.Table.Height()) * 0.45;
+        var players = table.PlayersClockwiseFromHero;
+        if (players.Count == 0)
+        {
+            return;
+        }
+
+        var maxDist = Math.Max(table.Table.Width(), table.Table.Height()) * 0.28;
         var tableBets = allBets
-            .Where(b => table.Table.CenterInside(b) || table.Table.DistanceTo(b) <= maxDist)
+            .Where(b => table.Table.CenterInside(b) || table.Table.DistanceTo(b) <= maxDist * 1.4)
             .ToList();
 
-        var betTotals = new Dictionary<PlayerSeatState, (long Sum, string Raw)>();
+        // Exclusive nearest: each bet → one player, greedily by closest distance.
+        var tableCx = table.Table.CenterX();
+        var tableCy = table.Table.CenterY();
+        var assignments = AssignBetsToClosestPlayers(tableBets, players, maxDist, tableCx, tableCy);
+        var betTotals = new Dictionary<PlayerSeatState, (long Amount, string Raw)>();
 
-        foreach (var bet in tableBets)
+        foreach (var (bet, owner) in assignments)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var owner = table.PlayersClockwiseFromHero
-                .Select(p => (Player: p, Dist: p.Detection.DistanceTo(bet)))
-                .OrderBy(x => x.Dist)
-                .First()
-                .Player;
-
-            using var crop = CropRegion(screenshot, bet, pad: 10, minWidth: 120, minHeight: 60, scale: 4);
-            var raw = await RecognizeAsync(crop).ConfigureAwait(false);
-            var amount = ParseAmount(raw, preferLargest: false);
-            if (amount is null)
-            {
-                if (!betTotals.ContainsKey(owner))
-                {
-                    betTotals[owner] = (0, raw);
-                }
-
-                continue;
-            }
+            using var crop = CropRegion(screenshot, bet, pad: 8, minWidth: 140, minHeight: 56, scale: 4);
+            using var boosted = BoostForOcr(crop);
+            var raw = await RecognizeAsync(boosted).ConfigureAwait(false);
+            var amount = ParseBetAmount(raw);
 
             if (betTotals.TryGetValue(owner, out var existing))
             {
-                betTotals[owner] = (existing.Sum + amount.Value, MergeRaw(existing.Raw, raw));
+                // Same seat can get multiple chip piles; keep the larger street bet.
+                var nextAmount = amount is long a
+                    ? Math.Max(existing.Amount, a)
+                    : existing.Amount;
+                betTotals[owner] = (nextAmount, MergeRaw(existing.Raw, raw));
             }
             else
             {
-                betTotals[owner] = (amount.Value, raw);
+                betTotals[owner] = (amount ?? 0, raw);
             }
         }
 
         foreach (var (player, value) in betTotals)
         {
-            if (value.Sum > 0)
+            if (value.Amount > 0)
             {
-                player.BetAmount = value.Sum;
+                player.BetAmount = value.Amount;
             }
 
             player.BetRawText = string.IsNullOrWhiteSpace(value.Raw) ? null : value.Raw;
         }
+    }
+
+    /// <summary>
+    /// Pairs each bet with the closest player (within maxDist). Closest pairs win first.
+    /// </summary>
+    internal static List<(Detection Bet, PlayerSeatState Player)> AssignBetsToClosestPlayers(
+        IReadOnlyList<Detection> bets,
+        IReadOnlyList<PlayerSeatState> players,
+        double maxDist,
+        double tableCenterX,
+        double tableCenterY)
+    {
+        var pairs = new List<(Detection Bet, PlayerSeatState Player, double Dist)>();
+        foreach (var bet in bets)
+        {
+            PlayerSeatState? bestPlayer = null;
+            var bestDist = double.MaxValue;
+            foreach (var player in players)
+            {
+                var dist = DistancePlayerToBet(player, bet, tableCenterX, tableCenterY);
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    bestPlayer = player;
+                }
+            }
+
+            if (bestPlayer is not null && bestDist <= maxDist)
+            {
+                pairs.Add((bet, bestPlayer, bestDist));
+            }
+        }
+
+        var assignedBets = new HashSet<Detection>();
+        var result = new List<(Detection Bet, PlayerSeatState Player)>(pairs.Count);
+        foreach (var pair in pairs.OrderBy(p => p.Dist))
+        {
+            if (!assignedBets.Add(pair.Bet))
+            {
+                continue;
+            }
+
+            result.Add((pair.Bet, pair.Player));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Distance from player to bet, with a bonus when the bet lies toward the table center.
+    /// </summary>
+    private static double DistancePlayerToBet(
+        PlayerSeatState player,
+        Detection bet,
+        double tableCenterX,
+        double tableCenterY)
+    {
+        var px = player.Detection.CenterX();
+        var py = player.Detection.CenterY();
+        var bx = bet.CenterX();
+        var by = bet.CenterY();
+        var euclidean = Math.Sqrt((px - bx) * (px - bx) + (py - by) * (py - by));
+
+        var playerToCenter = Math.Sqrt(
+            (px - tableCenterX) * (px - tableCenterX) + (py - tableCenterY) * (py - tableCenterY));
+        var betToCenter = Math.Sqrt(
+            (bx - tableCenterX) * (bx - tableCenterX) + (by - tableCenterY) * (by - tableCenterY));
+
+        // Chip bets sit inward from the seat; penalize bets behind the player (farther from center).
+        var inwardBonus = betToCenter < playerToCenter ? 0.85 : 1.15;
+        return euclidean * inwardBonus;
+    }
+
+    internal static long? ParseBetAmount(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        // Bet chips are a single amount; prefer the largest digit group OCR found.
+        return ParseAmount(text, preferLargest: true);
     }
 
     private async Task<string> RecognizeAsync(Bitmap crop)
