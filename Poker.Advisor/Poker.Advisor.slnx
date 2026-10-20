@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Poker.Advisor.Core/Poker.Advisor.Core.csproj" />
+  <Project Path="Poker.Advisor.Services/Poker.Advisor.Services.csproj" />
+  <Project Path="Poker.Advisor/Poker.Advisor.csproj" />
+</Solution>

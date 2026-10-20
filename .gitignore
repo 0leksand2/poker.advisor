@@ -1,0 +1,46 @@
+__pycache__/
+.vscode/
+
+# Dataset media/labels — keep class/annotation metadata tracked
+dataset/**
+!dataset/classes.txt
+!dataset/labels.txt
+!dataset/annotation.json
+
+# Runtime / eval
+/testing/
+/runs/
+
+# YOLO prepared splits
+model/yolo_dataset/
+model/yolo_dataset_img_with_background/
+
+# Keep model Python scripts and config tracked
+!model/
+!model/*.py
+!model/*.txt
+!model/*.yaml
+!model/*.yml
+
+# Training outputs — keep only latest trained weights (imgWithBackground best.pt)
+model/runs/*
+!model/runs/imgWithBackground/
+model/runs/imgWithBackground/*
+!model/runs/imgWithBackground/weights/
+model/runs/imgWithBackground/weights/*
+!model/runs/imgWithBackground/weights/best.pt
+
+# Downloaded base weights in repo root / model folder
+/yolov8*.pt
+/model/yolov8*.pt
+
+# Ultralytics / torch caches
+.ultralytics/
+wandb/
+*.onnx
+*.engine
+*.torchscript
+
+# .NET build outputs
+**/[Bb]in/
+**/[Oo]bj/
