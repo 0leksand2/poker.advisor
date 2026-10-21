@@ -24,18 +24,12 @@ public sealed class HeroRecommendation
         _ => PanelTone.Normal,
     };
 
+    /// <summary>Short panel line: advice: FOLD / CALL 750 / BET 1,250 / RAISE 3,750.</summary>
+    public string ToShortPanelText() => $"advice: {ShortActionLabel()}";
+
     public string ToPanelText()
     {
-        var action = Action switch
-        {
-            RecommendedAction.Fold => "FOLD",
-            RecommendedAction.Raise => FormatRaiseOrBetLabel(),
-            RecommendedAction.Call => FormatCallLabel(),
-            RecommendedAction.Check => "CHECK",
-            RecommendedAction.Wait => "WAIT",
-            _ => "?",
-        };
-
+        var action = ShortActionLabel();
         if (string.IsNullOrWhiteSpace(Summary))
         {
             return $"advice: {action}";
@@ -44,13 +38,23 @@ public sealed class HeroRecommendation
         return $"advice: {action} — {Summary}";
     }
 
+    public string ShortActionLabel() => Action switch
+    {
+        RecommendedAction.Fold => "FOLD",
+        RecommendedAction.Raise => FormatRaiseOrBetLabel(),
+        RecommendedAction.Call => FormatCallLabel(),
+        RecommendedAction.Check => "CHECK",
+        RecommendedAction.Wait => "WAIT",
+        _ => "?",
+    };
+
     private string FormatRaiseOrBetLabel()
     {
         // No bet facing → this is a bet into the pot.
         var isBet = FacingBet is null or 0;
         if (RaiseToAmount is long to)
         {
-            return isBet ? $"BET {Format(to)}" : $"RAISE to {Format(to)}";
+            return isBet ? $"BET {Format(to)}" : $"RAISE {Format(to)}";
         }
 
         return isBet ? "BET" : "RAISE";

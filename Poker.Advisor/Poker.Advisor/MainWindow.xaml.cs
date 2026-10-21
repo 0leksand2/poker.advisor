@@ -34,12 +34,17 @@ public partial class MainWindow : Window
     private readonly TableStateMachine _tableStateMachine = new();
     private readonly AmountOcrService _amountOcr = new();
     private readonly HeroRecommendationService _recommendations = HeroRecommendationService.CreateDefault();
+    private readonly PlayerTracker _playerTracker = new();
+    private readonly ScreenRecorder _screenRecorder = new(
+        retention: TimeSpan.FromSeconds(10),
+        minCaptureInterval: TimeSpan.FromMilliseconds(33));
     private PythonPredictor? _predictor;
     private CancellationTokenSource? _loopCts;
     private Canvas _frontCanvas = null!;
     private Canvas _backCanvas = null!;
     private int _isBusy;
     private bool _isPaused;
+    private bool _boxesEnabled = true;
     private string _status = "Starting predictor...";
 
     public MainWindow()
@@ -66,6 +71,7 @@ public partial class MainWindow : Window
         _isPaused = paused;
         if (paused)
         {
+            _screenRecorder.Stop();
             OverlayCanvasA.Children.Clear();
             OverlayCanvasB.Children.Clear();
             TableStateText.Text = "paused";
@@ -74,9 +80,27 @@ public partial class MainWindow : Window
         }
         else
         {
+            if (_predictor is not null)
+            {
+                _screenRecorder.Start();
+            }
+
             StatusText.Text = _status;
             Show();
             EnsureTopmost();
+        }
+    }
+
+    /// <summary>
+    /// Show/hide detection boxes. Bottom-right table panel keeps updating either way.
+    /// </summary>
+    public void SetBoxesEnabled(bool enabled)
+    {
+        _boxesEnabled = enabled;
+        if (!enabled)
+        {
+            OverlayCanvasA.Children.Clear();
+            OverlayCanvasB.Children.Clear();
         }
     }
 
@@ -106,6 +130,7 @@ public partial class MainWindow : Window
             _loopCts = new CancellationTokenSource();
             StatusText.Text = "Loading YOLO model...";
             _predictor = await PythonPredictor.StartAsync(_loopCts.Token).ConfigureAwait(true);
+            _screenRecorder.Start();
             _status = "Live";
             StatusText.Text = _status;
             EnsureTopmost();
@@ -121,6 +146,7 @@ public partial class MainWindow : Window
     private void OnClosed(object? sender, EventArgs e)
     {
         _timer.Stop();
+        _screenRecorder.Dispose();
         _loopCts?.Cancel();
         _predictor?.Dispose();
         _predictor = null;
@@ -143,9 +169,14 @@ public partial class MainWindow : Window
 
         try
         {
-            // Previous boxes stay visible while capture + prediction run.
-            using var frame = await Task.Run(() => ScreenCaptureService.CapturePrimaryScreen())
+            // Pull newest frame from the continuous in-memory recording buffer.
+            using var frame = await Task.Run(() => _screenRecorder.TryGetLatestFrame())
                 .ConfigureAwait(true);
+            if (frame is null)
+            {
+                return;
+            }
+
             var detections = await _predictor.PredictAsync(frame.Jpeg).ConfigureAwait(true);
 
             var tableStates = _tableStateMachine.Update(detections);
@@ -154,17 +185,30 @@ public partial class MainWindow : Window
                 await _amountOcr.EnrichAsync(tableStates, detections, frame.Bitmap).ConfigureAwait(true);
             }
 
+            _playerTracker.Update(tableStates);
             _recommendations.Apply(tableStates);
+
+            var buffered = _screenRecorder.BufferedFrameCount;
+            var ageMs = (int)Math.Max(0, (DateTime.UtcNow - frame.TimestampUtc).TotalMilliseconds);
 
             await Dispatcher.InvokeAsync(
                 () =>
                 {
                     EnsureTopmost();
-                    DrawDetections(detections, frame.Bounds);
+                    if (_boxesEnabled)
+                    {
+                        DrawDetections(detections, frame.Bounds);
+                    }
+                    else
+                    {
+                        OverlayCanvasA.Children.Clear();
+                        OverlayCanvasB.Children.Clear();
+                    }
+
                     UpdateTableStatePanel(tableStates);
                     _status = detections.Count == 0
-                        ? "Live · no detections"
-                        : $"Live · {detections.Count} boxes · {tableStates.Count} table(s)";
+                        ? $"Live · no detections · buf {buffered} · age {ageMs}ms"
+                        : $"Live · {detections.Count} boxes · {tableStates.Count} table(s) · buf {buffered} · age {ageMs}ms";
                     if (!_amountOcr.IsAvailable)
                     {
                         _status += " · OCR unavailable";
@@ -244,12 +288,34 @@ public partial class MainWindow : Window
         var callBrush = new SolidColorBrush(MediaColor.FromRgb(0x22, 0xC5, 0x5E)); // green
         var adviceFoldBrush = new SolidColorBrush(MediaColor.FromRgb(0xFF, 0x3B, 0x30)); // red
         var checkBrush = new SolidColorBrush(MediaColor.FromRgb(0xFF, 0xD6, 0x0A)); // yellow
+        var aggroMaxBrush = new SolidColorBrush(MediaColor.FromRgb(0xFF, 0x2D, 0x2D)); // red — most aggressive
+        var aggroHighBrush = new SolidColorBrush(MediaColor.FromRgb(0xFF, 0x8C, 0x1A)); // orange
+        var aggroLowBrush = new SolidColorBrush(MediaColor.FromRgb(0x9A, 0xE6, 0x4F)); // light green
+        var aggroMinBrush = new SolidColorBrush(MediaColor.FromRgb(0x22, 0xC5, 0x5E)); // green — least aggressive
         normalBrush.Freeze();
         foldBrush.Freeze();
         raiseBrush.Freeze();
         callBrush.Freeze();
         adviceFoldBrush.Freeze();
         checkBrush.Freeze();
+        aggroMaxBrush.Freeze();
+        aggroHighBrush.Freeze();
+        aggroLowBrush.Freeze();
+        aggroMinBrush.Freeze();
+
+        SolidColorBrush BrushFor(PanelTone tone) => tone switch
+        {
+            PanelTone.Fold => foldBrush,
+            PanelTone.AdviceRaise => raiseBrush,
+            PanelTone.AdviceCall => callBrush,
+            PanelTone.AdviceFold => adviceFoldBrush,
+            PanelTone.AdviceCheck => checkBrush,
+            PanelTone.StyleAggroMax => aggroMaxBrush,
+            PanelTone.StyleAggroHigh => aggroHighBrush,
+            PanelTone.StyleAggroLow => aggroLowBrush,
+            PanelTone.StyleAggroMin => aggroMinBrush,
+            _ => normalBrush,
+        };
 
         for (var t = 0; t < tableStates.Count; t++)
         {
@@ -262,21 +328,19 @@ public partial class MainWindow : Window
             for (var i = 0; i < lines.Count; i++)
             {
                 var line = lines[i];
-                var suffix = i < lines.Count - 1 ? "\n" : string.Empty;
-                var brush = line.Tone switch
+                foreach (var span in line.Spans)
                 {
-                    PanelTone.Fold => foldBrush,
-                    PanelTone.AdviceRaise => raiseBrush,
-                    PanelTone.AdviceCall => callBrush,
-                    PanelTone.AdviceFold => adviceFoldBrush,
-                    PanelTone.AdviceCheck => checkBrush,
-                    _ => normalBrush,
-                };
-                TableStateText.Inlines.Add(
-                    new System.Windows.Documents.Run(line.Text + suffix)
-                    {
-                        Foreground = brush,
-                    });
+                    TableStateText.Inlines.Add(
+                        new System.Windows.Documents.Run(span.Text)
+                        {
+                            Foreground = BrushFor(span.Tone),
+                        });
+                }
+
+                if (i < lines.Count - 1)
+                {
+                    TableStateText.Inlines.Add(new System.Windows.Documents.Run("\n") { Foreground = normalBrush });
+                }
             }
         }
     }

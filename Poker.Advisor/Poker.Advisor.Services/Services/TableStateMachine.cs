@@ -75,9 +75,10 @@ public sealed class TableStateMachine
             .FirstOrDefault();
 
         var heroDetection = matchedHero ?? CreateSyntheticHero(heroCards);
-        var heroBankRegion = matchedHero is null
-            ? CreateHeroBankRegion(table, heroCards)
-            : matchedHero;
+        // Always OCR hero stack from the nameplate under hole cards — never from a
+        // matched active_player box (GG often has no hero seat box, and when it does
+        // the box is cards/avatar, not the stack row).
+        var heroBankRegion = CreateHeroBankRegion(table, heroCards);
         var otherPlayers = matchedHero is null
             ? detectedPlayers
             : detectedPlayers.Where(p => !ReferenceEquals(p, matchedHero)).ToList();
@@ -181,14 +182,18 @@ public sealed class TableStateMachine
         var cardLeft = heroCards.Min(c => c.X1);
         var cardRight = heroCards.Max(c => c.X2);
         var cardBottom = heroCards.Max(c => c.Y2);
-        var padX = Math.Max(40, (cardRight - cardLeft) * 0.8);
+        var cardWidth = Math.Max(1, cardRight - cardLeft);
+
+        // GG nameplate sits centered under the hole cards (nickname + stack).
+        // Reach a bit into the card bottoms and extend downward for the stack row.
+        var padX = Math.Max(56, cardWidth * 1.05);
         var x1 = Math.Max(table.X1, cardLeft - padX);
         var x2 = Math.Min(table.X2, cardRight + padX);
-        var y1 = Math.Min(table.Y2 - 8, cardBottom);
-        var y2 = Math.Min(table.Y2, y1 + 110);
-        if (y2 <= y1 + 10)
+        var y1 = Math.Min(table.Y2 - 24, cardBottom - Math.Max(12, cardWidth * 0.08));
+        var y2 = Math.Min(table.Y2, y1 + 140);
+        if (y2 <= y1 + 20)
         {
-            y1 = Math.Max(table.Y1, table.Y2 - 110);
+            y1 = Math.Max(table.Y1, table.Y2 - 140);
             y2 = table.Y2;
         }
 

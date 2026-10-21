@@ -21,4 +21,8 @@ public sealed class PlayerSeatState
     public string? BankRawText { get; set; }
     public long? BetAmount { get; set; }
     public string? BetRawText { get; set; }
+
+    public string? Nickname { get; set; }
+    public string? NicknameRawText { get; set; }
+    public PlayerStats? Stats { get; set; }
 }

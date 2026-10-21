@@ -10,10 +10,14 @@ public sealed class ScreenFrame : IDisposable
     public required byte[] Jpeg { get; init; }
     public required Rectangle Bounds { get; init; }
     public required Bitmap Bitmap { get; init; }
+    public DateTime TimestampUtc { get; init; } = DateTime.UtcNow;
 
     public void Dispose() => Bitmap.Dispose();
 }
 
+/// <summary>
+/// Single-shot primary-screen grab (used by the continuous recorder).
+/// </summary>
 public static class ScreenCaptureService
 {
     public static ScreenFrame CapturePrimaryScreen(long quality = 75L)
@@ -40,6 +44,7 @@ public static class ScreenCaptureService
                 Jpeg = stream.ToArray(),
                 Bounds = bounds,
                 Bitmap = bitmap,
+                TimestampUtc = DateTime.UtcNow,
             };
         }
         catch
@@ -49,8 +54,13 @@ public static class ScreenCaptureService
         }
     }
 
-    private static ImageCodecInfo GetJpegEncoder()
+    public static Bitmap DecodeJpeg(byte[] jpeg)
     {
-        return ImageCodecInfo.GetImageEncoders().First(codec => codec.FormatID == ImageFormat.Jpeg.Guid);
+        using var stream = new MemoryStream(jpeg, writable: false);
+        using var image = Image.FromStream(stream);
+        return new Bitmap(image);
     }
+
+    private static ImageCodecInfo GetJpegEncoder() =>
+        ImageCodecInfo.GetImageEncoders().First(codec => codec.FormatID == ImageFormat.Jpeg.Guid);
 }

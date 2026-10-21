@@ -8,4 +8,12 @@ public enum PanelTone
     AdviceCall,
     AdviceFold,
     AdviceCheck,
+    /// <summary>Most aggressive (LAG / aggro).</summary>
+    StyleAggroMax,
+    /// <summary>Aggressive but tighter (TAG).</summary>
+    StyleAggroHigh,
+    /// <summary>Mild / passive.</summary>
+    StyleAggroLow,
+    /// <summary>Least aggressive (nit / station).</summary>
+    StyleAggroMin,
 }

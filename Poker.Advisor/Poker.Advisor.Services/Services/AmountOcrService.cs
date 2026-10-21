@@ -56,6 +56,7 @@ public sealed class AmountOcrService : IDisposable
             }
 
             await EnrichBanksAsync(table, screenshot, cancellationToken).ConfigureAwait(false);
+            await EnrichNicknamesAsync(table, screenshot, cancellationToken).ConfigureAwait(false);
             await EnrichBetsAsync(table, bets, screenshot, cancellationToken).ConfigureAwait(false);
         }
     }
@@ -179,6 +180,140 @@ public sealed class AmountOcrService : IDisposable
             player.BankRawText = raw;
             player.BankAmount = ParseBankAmount(raw);
         }
+    }
+
+    private async Task EnrichNicknamesAsync(
+        TableState table,
+        Bitmap screenshot,
+        CancellationToken cancellationToken)
+    {
+        foreach (var player in table.PlayersClockwiseFromHero)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var region = ResolveNicknameOcrRegion(player.BankRegion, screenshot);
+            using var crop = CropRegion(screenshot, region, pad: 2, minWidth: 200, minHeight: 36, scale: 3);
+            var raw = await RecognizeAsync(crop).ConfigureAwait(false);
+            player.NicknameRawText = raw;
+            var parsed = ParseNickname(raw);
+            if (!string.IsNullOrWhiteSpace(parsed))
+            {
+                player.Nickname = parsed;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Nameplate area above the stack divider (player nickname).
+    /// Skips the top of the plate so the orange timebank badge is excluded.
+    /// </summary>
+    private static Detection ResolveNicknameOcrRegion(Detection bankRegion, Bitmap screenshot)
+    {
+        var plate = NameplateRegion(bankRegion);
+        using var plateCrop = CropRegion(screenshot, plate, pad: 0, minWidth: 1, minHeight: 1, scale: 1);
+        var dividerLocalY = FindHorizontalDividerY(plateCrop);
+        var w = plate.Width();
+        var h = plate.Height();
+        var sideInset = w * 0.08;
+        // GG timebank sits on the avatar just above the dark plate — keep OCR below that bleed.
+        var topSkip = Math.Max(6, h * 0.18);
+
+        if (dividerLocalY > topSkip + 6)
+        {
+            var top = plate.Y1 + topSkip;
+            var bottom = Math.Min(plate.Y2 - 4, plate.Y1 + dividerLocalY - 1);
+            if (bottom > top + 6)
+            {
+                return new Detection(
+                    bankRegion.Name,
+                    bankRegion.Confidence,
+                    plate.X1 + sideInset,
+                    top,
+                    plate.X2 - sideInset,
+                    bottom);
+            }
+        }
+
+        // Fallback: middle band of nameplate (not the very top badge zone).
+        var fallbackTop = plate.Y1 + topSkip;
+        var fallbackBottom = plate.Y1 + h * 0.55;
+        return new Detection(
+            bankRegion.Name,
+            bankRegion.Confidence,
+            plate.X1 + sideInset,
+            fallbackTop,
+            plate.X2 - sideInset,
+            Math.Max(fallbackTop + 12, fallbackBottom));
+    }
+
+    internal static string? ParseNickname(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        var line = raw
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(l => Regex.Replace(l, @"[^\p{L}\p{N}_\-.\s]", string.Empty).Trim())
+            .Select(StripTimebankNumbers)
+            .Where(l => l.Length >= 2)
+            .OrderByDescending(l => l.Count(char.IsLetter))
+            .ThenByDescending(l => l.Length)
+            .FirstOrDefault();
+
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return null;
+        }
+
+        // Drop pure-numeric OCR (stack / timebank leak into nickname band).
+        if (line.All(c => char.IsDigit(c) || c is ',' or '.' or ' '))
+        {
+            return null;
+        }
+
+        // Allow longer GG nicks (SilentShark_515, raisesevendeuce, …).
+        if (line.Length > 24)
+        {
+            line = line[..24].Trim();
+        }
+
+        return line;
+    }
+
+    /// <summary>
+    /// Drops GG timebank values (0–100) only when they are leading/trailing tokens.
+    /// Keeps mid-nick numbers ("Gio 7 Phut") and glued ids (essi5, CoolShark_958, xiaoyuer_3).
+    /// </summary>
+    private static string StripTimebankNumbers(string line)
+    {
+        var tokens = Regex.Split(line.Trim(), @"\s+")
+            .Where(t => t.Length > 0)
+            .ToList();
+
+        while (tokens.Count > 0 && IsTimebankToken(tokens[0]))
+        {
+            tokens.RemoveAt(0);
+        }
+
+        while (tokens.Count > 0 && IsTimebankToken(tokens[^1]))
+        {
+            tokens.RemoveAt(tokens.Count - 1);
+        }
+
+        return tokens.Count == 0 ? string.Empty : string.Join(" ", tokens);
+    }
+
+    private static bool IsTimebankToken(string token)
+    {
+        // Orange timebank badge on GG is 0–100.
+        if (!Regex.IsMatch(token, @"^\d{1,3}$"))
+        {
+            return false;
+        }
+
+        return int.TryParse(token, out var n) && n is >= 0 and <= 100;
     }
 
     private async Task EnrichBetsAsync(
@@ -494,6 +629,7 @@ public sealed class AmountOcrService : IDisposable
     /// </summary>
     private static Detection ResolveBankOcrRegion(Detection bankRegion, Bitmap screenshot)
     {
+        var isHero = bankRegion.Name.Equals("hero_bank", StringComparison.OrdinalIgnoreCase);
         var plate = NameplateRegion(bankRegion);
         using var plateCrop = CropRegion(screenshot, plate, pad: 0, minWidth: 1, minHeight: 1, scale: 1);
         var dividerLocalY = FindHorizontalDividerY(plateCrop);
@@ -504,10 +640,13 @@ public sealed class AmountOcrService : IDisposable
 
         var w = plate.Width();
         var h = plate.Height();
-        var top = Math.Min(plate.Y2 - 8, plate.Y1 + dividerLocalY + 2);
-        var bottom = plate.Y2 - Math.Max(3, h * 0.06);
-        var left = plate.X1 + w * 0.10;
-        var right = plate.X2 - w * 0.10;
+        // Hero nameplate is shorter; keep a taller stack band under the divider.
+        var bottomTrim = isHero ? Math.Max(2, h * 0.04) : Math.Max(3, h * 0.06);
+        var sideInset = isHero ? w * 0.06 : w * 0.10;
+        var top = Math.Min(plate.Y2 - 10, plate.Y1 + dividerLocalY + 1);
+        var bottom = plate.Y2 - bottomTrim;
+        var left = plate.X1 + sideInset;
+        var right = plate.X2 - sideInset;
         if (bottom <= top + 4)
         {
             return StackAmountBand(bankRegion);
@@ -520,6 +659,7 @@ public sealed class AmountOcrService : IDisposable
     {
         if (box.Name.Equals("hero_bank", StringComparison.OrdinalIgnoreCase))
         {
+            // Hero bank ROI is already the nameplate under the cards (no avatar).
             return box;
         }
 
@@ -650,9 +790,10 @@ public sealed class AmountOcrService : IDisposable
         var isHeroBank = box.Name.Equals("hero_bank", StringComparison.OrdinalIgnoreCase);
 
         // Keep crop on the stack row under the name divider so nickname digits stay out.
-        var topFraction = isHeroBank ? 0.70 : 0.66;
-        var bottomTrim = isHeroBank ? 0.06 : 0.08;
-        var sideInset = isHeroBank ? 0.10 : 0.12;
+        // Hero ROI is nickname+stack only — stack sits lower-middle, not near the bottom edge.
+        var topFraction = isHeroBank ? 0.48 : 0.66;
+        var bottomTrim = isHeroBank ? 0.08 : 0.08;
+        var sideInset = isHeroBank ? 0.08 : 0.12;
 
         var top = box.Y1 + h * topFraction;
         var bottom = box.Y2 - Math.Max(3, h * bottomTrim);

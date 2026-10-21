@@ -8,14 +8,23 @@ internal sealed class TrayIconService : IDisposable
 {
     private readonly NotifyIcon _notifyIcon;
     private readonly ToolStripMenuItem _pauseMenuItem;
+    private readonly ToolStripMenuItem _boxesMenuItem;
     private bool _isPaused;
+    private bool _boxesEnabled = true;
 
     public TrayIconService()
     {
         _pauseMenuItem = new ToolStripMenuItem("Pause Service", null, OnPauseServiceClicked);
+        _boxesMenuItem = new ToolStripMenuItem("Show Boxes", null, OnBoxesClicked)
+        {
+            Checked = true,
+            CheckOnClick = false,
+        };
 
         var menu = new ContextMenuStrip();
+        menu.Items.Add(_boxesMenuItem);
         menu.Items.Add(_pauseMenuItem);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Exit", null, OnExitClicked));
 
         _notifyIcon = new NotifyIcon
@@ -31,6 +40,17 @@ internal sealed class TrayIconService : IDisposable
     {
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
+    }
+
+    private void OnBoxesClicked(object? sender, EventArgs e)
+    {
+        _boxesEnabled = !_boxesEnabled;
+        _boxesMenuItem.Checked = _boxesEnabled;
+
+        if (Application.Current.MainWindow is MainWindow window)
+        {
+            window.SetBoxesEnabled(_boxesEnabled);
+        }
     }
 
     private void OnPauseServiceClicked(object? sender, EventArgs e)

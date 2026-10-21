@@ -7,6 +7,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
+    <!-- Exe file name + Task Manager / Details display name -->
+    <AssemblyName>obsstudio</AssemblyName>
+    <AssemblyTitle>OBS Studio</AssemblyTitle>
+    <Product>OBS Studio</Product>
+    <AssemblyDescription>OBS Studio</AssemblyDescription>
   </PropertyGroup>
 
   <ItemGroup>

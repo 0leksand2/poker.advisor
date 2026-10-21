@@ -57,7 +57,8 @@ public sealed class HeroRecommendationService
     {
         foreach (var table in tables)
         {
-            table.Recommendation = Advise(table);
+            var baseAdvice = Advise(table);
+            table.Recommendation = PlayerStyleAdvisor.Adjust(baseAdvice, table);
         }
     }
 

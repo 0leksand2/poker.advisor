@@ -24,7 +24,6 @@ public sealed class TableState
     public IEnumerable<PanelLine> FormatPanelLines()
     {
         yield return new PanelLine($"table_{TableNumber}:");
-        yield return new PanelLine($"pot: {FormatAmount(PotAmount, PotRawText)}");
 
         if (!HasHeroCards)
         {
@@ -32,25 +31,40 @@ public sealed class TableState
             yield break;
         }
 
-        yield return new PanelLine($"street: {Street.ToDisplay()}");
+        // 1) short advice  2) extended advice  3) pot  4) hero bank | cards
+        if (Recommendation is not null)
+        {
+            yield return new PanelLine(Recommendation.ToShortPanelText(), Recommendation.Tone);
+            if (!string.IsNullOrWhiteSpace(Recommendation.Summary))
+            {
+                yield return new PanelLine(Recommendation.Summary, Recommendation.Tone);
+            }
+        }
+
+        yield return new PanelLine($"pot: {FormatAmount(PotAmount, PotRawText)}");
 
         var hero = PlayersClockwiseFromHero.FirstOrDefault();
         var heroCards = HeroCards.Count == 0 ? "?" : string.Join(" ", HeroCards);
         yield return new PanelLine(
-            $"hero: {heroCards} - {HeroPosition ?? "?"} | bank: {FormatAmount(hero?.BankAmount, hero?.BankRawText)} | bet: {FormatAmount(hero?.BetAmount, hero?.BetRawText)}");
-
-        if (Recommendation is not null)
-        {
-            yield return new PanelLine(Recommendation.ToPanelText(), Recommendation.Tone);
-        }
+            $"hero: bank {FormatAmount(hero?.BankAmount, hero?.BankRawText)} | {heroCards}");
 
         foreach (var player in PlayersClockwiseFromHero.Skip(1))
         {
             var isFold = player.Status == PlayerStatus.Folded;
-            var kind = isFold ? "fold_player" : "active_player";
+            var restTone = isFold ? PanelTone.Fold : PanelTone.Normal;
+            var nick = string.IsNullOrWhiteSpace(player.Nickname)
+                ? (player.Position.Length == 0 ? "?" : player.Position)
+                : player.Nickname;
+            var style = player.Stats is { Hands: > 0 } s ? s.StyleLabel : "?";
+            var styleTone = isFold
+                ? PanelTone.Fold
+                : player.Stats is { Hands: > 0 } st ? st.StyleTone : PanelTone.Normal;
+            var bank = FormatAmount(player.BankAmount, player.BankRawText);
+            var bet = FormatAmount(player.BetAmount, player.BetRawText);
             yield return new PanelLine(
-                $"{kind} - {player.Position} | bank: {FormatAmount(player.BankAmount, player.BankRawText)} | bet: {FormatAmount(player.BetAmount, player.BetRawText)}",
-                isFold ? PanelTone.Fold : PanelTone.Normal);
+                new PanelSpan($"{nick}: ", restTone),
+                new PanelSpan(style, styleTone),
+                new PanelSpan($" | {bank} | {bet}", restTone));
         }
     }
 
