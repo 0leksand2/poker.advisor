@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Windows.Forms;
+using Poker.Advisor.Enums;
 using Application = System.Windows.Application;
 
 namespace Poker.Advisor;
@@ -8,21 +9,34 @@ internal sealed class TrayIconService : IDisposable
 {
     private readonly NotifyIcon _notifyIcon;
     private readonly ToolStripMenuItem _pauseMenuItem;
-    private readonly ToolStripMenuItem _boxesMenuItem;
+    private readonly ToolStripMenuItem _allBoxesMenuItem;
+    private readonly ToolStripMenuItem _minimalBoxesMenuItem;
+    private readonly ToolStripMenuItem _adviceOnlyMenuItem;
     private bool _isPaused;
-    private bool _boxesEnabled = true;
+    private BoxDisplayMode _boxMode = BoxDisplayMode.Minimal;
 
     public TrayIconService()
     {
         _pauseMenuItem = new ToolStripMenuItem("Pause Service", null, OnPauseServiceClicked);
-        _boxesMenuItem = new ToolStripMenuItem("Show Boxes", null, OnBoxesClicked)
+        _allBoxesMenuItem = new ToolStripMenuItem("Show All Boxes", null, OnAllBoxesClicked)
+        {
+            CheckOnClick = false,
+        };
+        _minimalBoxesMenuItem = new ToolStripMenuItem("Show Minimal Boxes", null, OnMinimalBoxesClicked)
         {
             Checked = true,
             CheckOnClick = false,
         };
+        _adviceOnlyMenuItem = new ToolStripMenuItem("Advice Only", null, OnAdviceOnlyClicked)
+        {
+            CheckOnClick = false,
+        };
 
         var menu = new ContextMenuStrip();
-        menu.Items.Add(_boxesMenuItem);
+        menu.Items.Add(_allBoxesMenuItem);
+        menu.Items.Add(_minimalBoxesMenuItem);
+        menu.Items.Add(_adviceOnlyMenuItem);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_pauseMenuItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Exit", null, OnExitClicked));
@@ -36,20 +50,42 @@ internal sealed class TrayIconService : IDisposable
         };
     }
 
+    public void SetStatus(string status)
+    {
+        var tip = string.IsNullOrWhiteSpace(status) ? "Poker Advisor" : status.Trim();
+        if (tip.Length > 60)
+        {
+            tip = tip[..57] + "...";
+        }
+
+        _notifyIcon.Text = tip;
+    }
+
     public void Dispose()
     {
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
     }
 
-    private void OnBoxesClicked(object? sender, EventArgs e)
+    private void OnAllBoxesClicked(object? sender, EventArgs e) =>
+        ApplyBoxMode(_boxMode == BoxDisplayMode.All ? BoxDisplayMode.Off : BoxDisplayMode.All);
+
+    private void OnMinimalBoxesClicked(object? sender, EventArgs e) =>
+        ApplyBoxMode(_boxMode == BoxDisplayMode.Minimal ? BoxDisplayMode.Off : BoxDisplayMode.Minimal);
+
+    private void OnAdviceOnlyClicked(object? sender, EventArgs e) =>
+        ApplyBoxMode(_boxMode == BoxDisplayMode.AdviceOnly ? BoxDisplayMode.Off : BoxDisplayMode.AdviceOnly);
+
+    private void ApplyBoxMode(BoxDisplayMode mode)
     {
-        _boxesEnabled = !_boxesEnabled;
-        _boxesMenuItem.Checked = _boxesEnabled;
+        _boxMode = mode;
+        _allBoxesMenuItem.Checked = mode == BoxDisplayMode.All;
+        _minimalBoxesMenuItem.Checked = mode == BoxDisplayMode.Minimal;
+        _adviceOnlyMenuItem.Checked = mode == BoxDisplayMode.AdviceOnly;
 
         if (Application.Current.MainWindow is MainWindow window)
         {
-            window.SetBoxesEnabled(_boxesEnabled);
+            window.SetBoxDisplayMode(mode);
         }
     }
 
@@ -57,6 +93,7 @@ internal sealed class TrayIconService : IDisposable
     {
         _isPaused = !_isPaused;
         _pauseMenuItem.Text = _isPaused ? "Resume Service" : "Pause Service";
+        SetStatus(_isPaused ? "Paused" : "Poker Advisor");
 
         if (Application.Current.MainWindow is MainWindow window)
         {

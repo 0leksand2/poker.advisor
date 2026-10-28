@@ -1,7 +1,7 @@
 using System.Globalization;
 using Poker.Advisor.Core.Enums;
 
-namespace Poker.Advisor.Core.Models;
+namespace Poker.Advisor.Core.Classes;
 
 public sealed class HeroRecommendation
 {

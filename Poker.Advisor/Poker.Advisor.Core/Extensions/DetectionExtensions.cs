@@ -1,4 +1,4 @@
-using Poker.Advisor.Core.Models;
+using Poker.Advisor.Core.Classes;
 
 namespace Poker.Advisor.Core.Extensions;
 
@@ -40,6 +40,24 @@ public static class DetectionExtensions
     public static bool IsDealer(this Detection d) =>
         d.Name.Equals("dealer", StringComparison.OrdinalIgnoreCase);
 
+    public static bool IsNickname(this Detection d) =>
+        d.Name.Equals("nickname", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsBank(this Detection d) =>
+        d.Name.Equals("bank", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsBet(this Detection d) =>
+        d.Name.Equals("bet", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsPot(this Detection d) =>
+        d.Name.Equals("pot", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsActionButton(this Detection d) =>
+        d.Name.EndsWith("_btn", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsPotPercentButton(this Detection d) =>
+        d.Name.EndsWith("_p_pot", StringComparison.OrdinalIgnoreCase);
+
     public static bool IsCard(this Detection d)
     {
         if (d.Name.Length != 2)
@@ -51,6 +69,11 @@ public static class DetectionExtensions
         var suit = char.ToUpperInvariant(d.Name[1]);
         return "23456789TJQKA".Contains(rank) && "CDHS".Contains(suit);
     }
+
+    /// <summary>Table, cards, and player seats — used for minimal overlay boxes.</summary>
+    public static bool IsMinimalOverlay(this Detection d) =>
+        d.IsTable() || d.IsCard() || d.IsPlayer();
+
 
     public static int TableNumber(this Detection d)
     {

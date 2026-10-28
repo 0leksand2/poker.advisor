@@ -1,17 +1,20 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Forms;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Shapes;
 using System.Windows.Threading;
+using Poker.Advisor.Classes;
 using Poker.Advisor.Core.Enums;
-using Poker.Advisor.Core.Models;
+using Poker.Advisor.Core.Extensions;
+using Poker.Advisor.Core.Classes;
 using Poker.Advisor.Core.Recommendations;
+using Poker.Advisor.Enums;
 using Poker.Advisor.Services;
-using MediaBrushes = System.Windows.Media.Brushes;
 using MediaColor = System.Windows.Media.Color;
-using WpfPoint = System.Windows.Point;
 using WpfRectangle = System.Windows.Shapes.Rectangle;
 
 namespace Poker.Advisor;
@@ -29,6 +32,8 @@ public partial class MainWindow : Window
     private const uint SwpNoactivate = 0x0010;
     private const uint SwpShowwindow = 0x0040;
     private static readonly TimeSpan CaptureInterval = TimeSpan.FromMilliseconds(200);
+    private const double StrokeThickness = 1.25;
+    private const double BracketLenMax = 16;
 
     private readonly DispatcherTimer _timer;
     private readonly TableStateMachine _tableStateMachine = new();
@@ -44,8 +49,8 @@ public partial class MainWindow : Window
     private Canvas _backCanvas = null!;
     private int _isBusy;
     private bool _isPaused;
-    private bool _boxesEnabled = true;
-    private string _status = "Starting predictor...";
+    private BoxDisplayMode _boxMode = BoxDisplayMode.Minimal;
+    private string _status = "starting";
 
     public MainWindow()
     {
@@ -72,10 +77,9 @@ public partial class MainWindow : Window
         if (paused)
         {
             _screenRecorder.Stop();
-            OverlayCanvasA.Children.Clear();
-            OverlayCanvasB.Children.Clear();
-            TableStateText.Text = "paused";
-            StatusText.Text = "Paused";
+            ClearOverlayBoxes();
+            AdvicePanelHost.Children.Clear();
+            SetStatusUi("paused");
             Hide();
         }
         else
@@ -85,22 +89,21 @@ public partial class MainWindow : Window
                 _screenRecorder.Start();
             }
 
-            StatusText.Text = _status;
+            SetStatusUi(_status);
             Show();
             EnsureTopmost();
         }
     }
 
     /// <summary>
-    /// Show/hide detection boxes. Bottom-right table panel keeps updating either way.
+    /// All / minimal / advice-only / off. Advice panel keeps updating either way.
     /// </summary>
-    public void SetBoxesEnabled(bool enabled)
+    internal void SetBoxDisplayMode(BoxDisplayMode mode)
     {
-        _boxesEnabled = enabled;
-        if (!enabled)
+        _boxMode = mode;
+        if (mode is BoxDisplayMode.Off or BoxDisplayMode.AdviceOnly)
         {
-            OverlayCanvasA.Children.Clear();
-            OverlayCanvasB.Children.Clear();
+            ClearOverlayBoxes();
         }
     }
 
@@ -116,7 +119,6 @@ public partial class MainWindow : Window
             GwlExstyle,
             extendedStyle | WsExTransparent | WsExLayered | WsExToolwindow);
 
-        // Keep overlay visible to the user, but omit it from screen captures.
         _ = SetWindowDisplayAffinity(hwnd, WdaExcludeFromCapture);
         EnsureTopmost();
     }
@@ -128,18 +130,18 @@ public partial class MainWindow : Window
             CoverPrimaryScreen();
             EnsureTopmost();
             _loopCts = new CancellationTokenSource();
-            StatusText.Text = "Loading YOLO model...";
+            SetStatusUi("loading model…");
             _predictor = await PythonPredictor.StartAsync(_loopCts.Token).ConfigureAwait(true);
             _screenRecorder.Start();
-            _status = "Live";
-            StatusText.Text = _status;
+            _status = "live";
+            SetStatusUi(_status);
             EnsureTopmost();
             _timer.Start();
         }
         catch (Exception ex)
         {
-            _status = "Predictor failed";
-            StatusText.Text = $"Predictor failed: {ex.Message}";
+            _status = "predictor failed";
+            SetStatusUi($"predictor failed · {ex.Message}");
         }
     }
 
@@ -169,7 +171,6 @@ public partial class MainWindow : Window
 
         try
         {
-            // Pull newest frame from the continuous in-memory recording buffer.
             using var frame = await Task.Run(() => _screenRecorder.TryGetLatestFrame())
                 .ConfigureAwait(true);
             if (frame is null)
@@ -195,26 +196,17 @@ public partial class MainWindow : Window
                 () =>
                 {
                     EnsureTopmost();
-                    if (_boxesEnabled)
-                    {
-                        DrawDetections(detections, frame.Bounds);
-                    }
-                    else
-                    {
-                        OverlayCanvasA.Children.Clear();
-                        OverlayCanvasB.Children.Clear();
-                    }
-
-                    UpdateTableStatePanel(tableStates);
+                    DrawOverlay(detections, tableStates);
+                    UpdateAdvicePanel(tableStates);
                     _status = detections.Count == 0
-                        ? $"Live · no detections · buf {buffered} · age {ageMs}ms"
-                        : $"Live · {detections.Count} boxes · {tableStates.Count} table(s) · buf {buffered} · age {ageMs}ms";
+                        ? $"live · 0 det · {tableStates.Count} tbl · {ageMs}ms"
+                        : $"live · {detections.Count} det · {tableStates.Count} tbl · buf {buffered}";
                     if (!_amountOcr.IsAvailable)
                     {
-                        _status += " · OCR unavailable";
+                        _status += " · no ocr";
                     }
 
-                    StatusText.Text = _status;
+                    SetStatusUi(_status);
                 },
                 DispatcherPriority.Render);
         }
@@ -222,14 +214,26 @@ public partial class MainWindow : Window
         {
             await Dispatcher.InvokeAsync(() =>
             {
-                _status = "Error";
-                StatusText.Text = $"Error: {ex.Message}";
+                _status = "error";
+                SetStatusUi($"error · {ex.Message}");
             });
         }
         finally
         {
             Interlocked.Exchange(ref _isBusy, 0);
         }
+    }
+
+    private void SetStatusUi(string text)
+    {
+        StatusText.Text = text;
+        App.CurrentApp.UpdateTrayStatus($"Poker Advisor · {text}");
+    }
+
+    private void ClearOverlayBoxes()
+    {
+        OverlayCanvasA.Children.Clear();
+        OverlayCanvasB.Children.Clear();
     }
 
     private void CoverPrimaryScreen()
@@ -271,159 +275,349 @@ public partial class MainWindow : Window
             SwpNomove | SwpNosize | SwpNoactivate | SwpShowwindow);
     }
 
-    private void UpdateTableStatePanel(IReadOnlyList<TableState> tableStates)
+    private void UpdateAdvicePanel(IReadOnlyList<TableState> tableStates)
     {
-        TableStateText.Text = null;
-        TableStateText.Inlines.Clear();
+        AdvicePanelHost.Children.Clear();
 
-        if (tableStates.Count == 0)
+        var active = tableStates.Where(t => t.HasHeroCards).ToList();
+        if (active.Count == 0)
         {
-            TableStateText.Text = "table: none detected";
+            AdvicePanelHost.Visibility = Visibility.Collapsed;
             return;
         }
 
-        var normalBrush = new SolidColorBrush(MediaColor.FromRgb(0xF0, 0xF0, 0xF0));
-        var foldBrush = new SolidColorBrush(MediaColor.FromRgb(0x9A, 0x9A, 0x9A));
-        var raiseBrush = new SolidColorBrush(MediaColor.FromRgb(0x39, 0xFF, 0x14)); // bright green
-        var callBrush = new SolidColorBrush(MediaColor.FromRgb(0x22, 0xC5, 0x5E)); // green
-        var adviceFoldBrush = new SolidColorBrush(MediaColor.FromRgb(0xFF, 0x3B, 0x30)); // red
-        var checkBrush = new SolidColorBrush(MediaColor.FromRgb(0xFF, 0xD6, 0x0A)); // yellow
-        var aggroMaxBrush = new SolidColorBrush(MediaColor.FromRgb(0xFF, 0x2D, 0x2D)); // red — most aggressive
-        var aggroHighBrush = new SolidColorBrush(MediaColor.FromRgb(0xFF, 0x8C, 0x1A)); // orange
-        var aggroLowBrush = new SolidColorBrush(MediaColor.FromRgb(0x9A, 0xE6, 0x4F)); // light green
-        var aggroMinBrush = new SolidColorBrush(MediaColor.FromRgb(0x22, 0xC5, 0x5E)); // green — least aggressive
-        normalBrush.Freeze();
-        foldBrush.Freeze();
-        raiseBrush.Freeze();
-        callBrush.Freeze();
-        adviceFoldBrush.Freeze();
-        checkBrush.Freeze();
-        aggroMaxBrush.Freeze();
-        aggroHighBrush.Freeze();
-        aggroLowBrush.Freeze();
-        aggroMinBrush.Freeze();
-
-        SolidColorBrush BrushFor(PanelTone tone) => tone switch
+        AdvicePanelHost.Visibility = Visibility.Visible;
+        foreach (var table in active.OrderBy(ActionSortKey))
         {
-            PanelTone.Fold => foldBrush,
-            PanelTone.AdviceRaise => raiseBrush,
-            PanelTone.AdviceCall => callBrush,
-            PanelTone.AdviceFold => adviceFoldBrush,
-            PanelTone.AdviceCheck => checkBrush,
-            PanelTone.StyleAggroMax => aggroMaxBrush,
-            PanelTone.StyleAggroHigh => aggroHighBrush,
-            PanelTone.StyleAggroLow => aggroLowBrush,
-            PanelTone.StyleAggroMin => aggroMinBrush,
-            _ => normalBrush,
-        };
-
-        for (var t = 0; t < tableStates.Count; t++)
-        {
-            if (t > 0)
-            {
-                TableStateText.Inlines.Add(new System.Windows.Documents.Run("\n\n") { Foreground = normalBrush });
-            }
-
-            var lines = tableStates[t].FormatPanelLines().ToList();
-            for (var i = 0; i < lines.Count; i++)
-            {
-                var line = lines[i];
-                foreach (var span in line.Spans)
-                {
-                    TableStateText.Inlines.Add(
-                        new System.Windows.Documents.Run(span.Text)
-                        {
-                            Foreground = BrushFor(span.Tone),
-                        });
-                }
-
-                if (i < lines.Count - 1)
-                {
-                    TableStateText.Inlines.Add(new System.Windows.Documents.Run("\n") { Foreground = normalBrush });
-                }
-            }
+            AdvicePanelHost.Children.Add(BuildAdviceCard(table));
         }
     }
 
-    private void DrawDetections(IReadOnlyList<Detection> detections, System.Drawing.Rectangle screenBounds)
+    private static int ActionSortKey(TableState table) => table.Recommendation?.Action switch
     {
-        _ = screenBounds;
-        var dpi = VisualTreeHelper.GetDpi(this);
+        RecommendedAction.Raise => 0,
+        RecommendedAction.Call => 1,
+        RecommendedAction.Check => 2,
+        RecommendedAction.Fold => 3,
+        RecommendedAction.Wait => 4,
+        _ => 5,
+    };
 
-        _backCanvas.Children.Clear();
-        foreach (var detection in detections)
+    private static Border BuildAdviceCard(TableState table)
+    {
+        var advice = table.Recommendation;
+        var actionColor = advice is null
+            ? OverlayPalette.TextMuted
+            : OverlayPalette.ForAdvice(advice.Action);
+        var actionText = advice?.ShortActionLabel() ?? "WAIT";
+        var needsAction = advice is not null && IsPlayAction(advice.Action);
+
+        var root = new Grid();
+        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(needsAction ? 5 : 3) });
+        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        var bar = new WpfRectangle
         {
-            // Capture and overlay both cover the primary screen, so map image pixels -> DIPs directly.
-            var x = detection.X1 / dpi.DpiScaleX;
-            var y = detection.Y1 / dpi.DpiScaleY;
-            var width = Math.Max(2, (detection.X2 - detection.X1) / dpi.DpiScaleX);
-            var height = Math.Max(2, (detection.Y2 - detection.Y1) / dpi.DpiScaleY);
-            var stroke = BrushFor(detection.Name);
+            Fill = OverlayPalette.Brush(actionColor),
+            RadiusX = 1,
+            RadiusY = 1,
+        };
+        Grid.SetColumn(bar, 0);
+        root.Children.Add(bar);
 
-            var rect = new WpfRectangle
-            {
-                Width = width,
-                Height = height,
-                Stroke = stroke,
-                StrokeThickness = 2,
-                Fill = MediaBrushes.Transparent,
-                SnapsToDevicePixels = true,
-            };
-            Canvas.SetLeft(rect, x);
-            Canvas.SetTop(rect, y);
-            _backCanvas.Children.Add(rect);
+        var body = new StackPanel { Margin = new Thickness(10, 0, 0, 0) };
+        Grid.SetColumn(body, 1);
+        root.Children.Add(body);
 
-            var label = new TextBlock
+        var header = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
+        header.Children.Add(new Border
+        {
+            Background = OverlayPalette.Brush(actionColor, needsAction ? (byte)0xFF : (byte)0x66),
+            CornerRadius = new CornerRadius(3),
+            Padding = new Thickness(6, 2, 6, 2),
+            Margin = new Thickness(0, 0, 8, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Child = new TextBlock
             {
-                Text = $"{detection.Name} {detection.Confidence:0.00}",
-                Foreground = MediaBrushes.Black,
-                Background = stroke,
-                FontSize = 10,
-                FontWeight = FontWeights.SemiBold,
-                Padding = new Thickness(2, 0, 2, 0),
-            };
-            Canvas.SetLeft(label, x);
-            Canvas.SetTop(label, Math.Max(0, y - 14));
-            _backCanvas.Children.Add(label);
+                Text = $"T{table.TableNumber}",
+                FontSize = 13,
+                FontWeight = FontWeights.Bold,
+                Foreground = OverlayPalette.Brush(MediaColor.FromRgb(0x0A, 0x0C, 0x10)),
+            },
+        });
+        header.Children.Add(new TextBlock
+        {
+            Text = actionText,
+            FontSize = needsAction ? 22 : 18,
+            FontWeight = FontWeights.Bold,
+            Foreground = OverlayPalette.Brush(actionColor),
+            VerticalAlignment = VerticalAlignment.Center,
+        });
+        body.Children.Add(header);
+
+        if (advice is not null && !string.IsNullOrWhiteSpace(advice.Summary))
+        {
+            body.Children.Add(new TextBlock
+            {
+                Text = advice.Summary,
+                FontSize = 12,
+                FontWeight = FontWeights.Medium,
+                Foreground = OverlayPalette.Brush(OverlayPalette.TextPrimary, 0xD0),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 2, 0, 0),
+            });
         }
 
-        // Swap buffers in one step so the old frame stays until the new one is ready.
+        var hero = table.PlayersClockwiseFromHero.FirstOrDefault();
+        var heroCards = table.HeroCards.Count == 0 ? "?" : string.Join(" ", table.HeroCards);
+        body.Children.Add(new TextBlock
+        {
+            Text = $"pot {FormatAmount(table.PotAmount, table.PotRawText)}  ·  hero {FormatAmount(hero?.BankAmount, hero?.BankRawText)}  ·  {heroCards}",
+            FontSize = 11,
+            Foreground = OverlayPalette.Brush(OverlayPalette.TextMuted),
+            Margin = new Thickness(0, 6, 0, 0),
+            TextWrapping = TextWrapping.Wrap,
+        });
+
+        foreach (var player in table.PlayersClockwiseFromHero.Skip(1))
+        {
+            var isFold = player.Status == PlayerStatus.Folded;
+            var nick = string.IsNullOrWhiteSpace(player.Nickname)
+                ? (player.Position.Length == 0 ? "?" : player.Position)
+                : player.Nickname;
+            var style = player.Stats is { Hands: > 0 } s ? s.StyleLabel : "?";
+            var styleTone = isFold
+                ? PanelTone.Fold
+                : player.Stats is { Hands: > 0 } st ? st.StyleTone : PanelTone.Normal;
+
+            var line = new TextBlock
+            {
+                FontSize = 11,
+                Margin = new Thickness(0, 2, 0, 0),
+                TextWrapping = TextWrapping.Wrap,
+            };
+            line.Inlines.Add(new System.Windows.Documents.Run($"{nick}: ")
+            {
+                Foreground = OverlayPalette.Brush(isFold ? OverlayPalette.TextFold : OverlayPalette.TextPrimary, 0xC0),
+            });
+            line.Inlines.Add(new System.Windows.Documents.Run(style)
+            {
+                Foreground = OverlayPalette.Brush(OverlayPalette.ForTone(styleTone)),
+            });
+            line.Inlines.Add(new System.Windows.Documents.Run(
+                $" · {FormatAmount(player.BankAmount, player.BankRawText)} · {FormatAmount(player.BetAmount, player.BetRawText)}")
+            {
+                Foreground = OverlayPalette.Brush(isFold ? OverlayPalette.TextFold : OverlayPalette.TextMuted),
+            });
+            body.Children.Add(line);
+        }
+
+        return new Border
+        {
+            Child = root,
+            Background = OverlayPalette.Brush(MediaColor.FromRgb(0x10, 0x14, 0x18), 0xB8),
+            BorderBrush = OverlayPalette.Brush(actionColor, needsAction ? (byte)0xAA : (byte)0x33),
+            BorderThickness = new Thickness(needsAction ? 2 : 1),
+            CornerRadius = new CornerRadius(5),
+            Padding = new Thickness(0, 10, 12, 10),
+            Margin = new Thickness(0, 0, 0, 8),
+            MaxWidth = 420,
+        };
+    }
+
+    private void DrawOverlay(IReadOnlyList<Detection> detections, IReadOnlyList<TableState> tableStates)
+    {
+        if (_boxMode == BoxDisplayMode.Off)
+        {
+            ClearOverlayBoxes();
+            return;
+        }
+
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var byNumber = tableStates.ToDictionary(t => t.TableNumber);
+        _backCanvas.Children.Clear();
+
+        if (_boxMode is BoxDisplayMode.Minimal or BoxDisplayMode.All)
+        {
+            var source = _boxMode == BoxDisplayMode.Minimal
+                ? detections.Where(d => d.IsMinimalOverlay())
+                : detections;
+
+            foreach (var detection in source)
+            {
+                var x = detection.X1 / dpi.DpiScaleX;
+                var y = detection.Y1 / dpi.DpiScaleY;
+                var width = Math.Max(2, (detection.X2 - detection.X1) / dpi.DpiScaleX);
+                var height = Math.Max(2, (detection.Y2 - detection.Y1) / dpi.DpiScaleY);
+                var color = ResolveBoxColor(detection, byNumber);
+
+                AddCornerBrackets(_backCanvas, x, y, width, height, color);
+                AddBoxLabel(_backCanvas, detection, x, y, color);
+            }
+        }
+
+        // Pin action badges on tables (Advice Only also outlines the table in action color).
+        var outlineTables = _boxMode == BoxDisplayMode.AdviceOnly;
+        foreach (var table in tableStates.Where(t => t.HasHeroCards))
+        {
+            AddTableActionBadge(_backCanvas, table, dpi.DpiScaleX, dpi.DpiScaleY, outlineTables);
+        }
+
         _backCanvas.Visibility = Visibility.Visible;
         _frontCanvas.Visibility = Visibility.Collapsed;
         (_frontCanvas, _backCanvas) = (_backCanvas, _frontCanvas);
-
-        // Force a layout pass so boxes appear immediately.
         _frontCanvas.InvalidateVisual();
         UpdateLayout();
     }
 
-    private static System.Windows.Media.Brush BrushFor(string name)
+    private static MediaColor ResolveBoxColor(Detection detection, IReadOnlyDictionary<int, TableState> byNumber)
     {
-        MediaColor color;
-        if (name == "table" || name.StartsWith("table_", StringComparison.Ordinal))
+        if (detection.IsTable()
+            && byNumber.TryGetValue(detection.TableNumber(), out var table)
+            && table.Recommendation is { } advice
+            && IsPlayAction(advice.Action))
         {
-            color = MediaColor.FromRgb(0, 160, 255);
-        }
-        else if (name == "active_player")
-        {
-            color = MediaColor.FromRgb(255, 180, 0);
-        }
-        else if (name == "fold_player")
-        {
-            color = MediaColor.FromRgb(255, 40, 40);
-        }
-        else if (name == "dealer")
-        {
-            color = MediaColor.FromRgb(255, 140, 0);
-        }
-        else
-        {
-            color = MediaColor.FromRgb(0, 220, 0);
+            return OverlayPalette.ForAdvice(advice.Action);
         }
 
-        var brush = new SolidColorBrush(color);
-        brush.Freeze();
-        return brush;
+        return OverlayPalette.ForDetection(detection);
+    }
+
+    private static bool IsPlayAction(RecommendedAction action) =>
+        action is RecommendedAction.Raise
+            or RecommendedAction.Call
+            or RecommendedAction.Check
+            or RecommendedAction.Fold;
+
+    private static void AddTableActionBadge(
+        Canvas canvas,
+        TableState table,
+        double dpiX,
+        double dpiY,
+        bool outlineTable)
+    {
+        var advice = table.Recommendation;
+        if (advice is null || !IsPlayAction(advice.Action))
+        {
+            return;
+        }
+
+        var color = OverlayPalette.ForAdvice(advice.Action);
+        var label = $"T{table.TableNumber}  {advice.ShortActionLabel()}";
+        var x = table.Table.X1 / dpiX;
+        var y = table.Table.Y1 / dpiY;
+        var width = Math.Max(2, (table.Table.X2 - table.Table.X1) / dpiX);
+        var height = Math.Max(2, (table.Table.Y2 - table.Table.Y1) / dpiY);
+
+        if (outlineTable)
+        {
+            AddCornerBrackets(canvas, x, y, width, height, color);
+        }
+
+        var badge = new Border
+        {
+            Background = OverlayPalette.Brush(MediaColor.FromArgb(0x01, 0, 0, 0)),
+            BorderBrush = OverlayPalette.Brush(color),
+            BorderThickness = new Thickness(1.5),
+            CornerRadius = new CornerRadius(3),
+            Padding = new Thickness(8, 3, 8, 4),
+            Child = new TextBlock
+            {
+                Text = label,
+                FontSize = 15,
+                FontWeight = FontWeights.Bold,
+                Foreground = OverlayPalette.Brush(color),
+            },
+        };
+
+        Canvas.SetLeft(badge, x + 6);
+        Canvas.SetTop(badge, Math.Max(0, y + 6));
+        canvas.Children.Add(badge);
+    }
+
+    private static void AddCornerBrackets(
+        Canvas canvas,
+        double x,
+        double y,
+        double width,
+        double height,
+        MediaColor color)
+    {
+        var len = Math.Min(BracketLenMax, Math.Min(width, height) * 0.28);
+        len = Math.Max(6, len);
+        var stroke = OverlayPalette.Brush(color);
+        var x2 = x + width;
+        var y2 = y + height;
+
+        void Seg(double x1, double y1, double xEnd, double yEnd)
+        {
+            var line = new Line
+            {
+                X1 = x1,
+                Y1 = y1,
+                X2 = xEnd,
+                Y2 = yEnd,
+                Stroke = stroke,
+                StrokeThickness = StrokeThickness,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                SnapsToDevicePixels = true,
+            };
+            canvas.Children.Add(line);
+        }
+
+        // Top-left
+        Seg(x, y, x + len, y);
+        Seg(x, y, x, y + len);
+        // Top-right
+        Seg(x2 - len, y, x2, y);
+        Seg(x2, y, x2, y + len);
+        // Bottom-left
+        Seg(x, y2, x + len, y2);
+        Seg(x, y2 - len, x, y2);
+        // Bottom-right
+        Seg(x2 - len, y2, x2, y2);
+        Seg(x2, y2 - len, x2, y2);
+    }
+
+    private void AddBoxLabel(
+        Canvas canvas,
+        Detection detection,
+        double x,
+        double y,
+        MediaColor color)
+    {
+        var text = _boxMode == BoxDisplayMode.Minimal
+            ? OverlayPalette.ShortLabel(detection)
+            : $"{OverlayPalette.ShortLabel(detection)} {detection.Confidence:0.00}";
+
+        var label = new TextBlock
+        {
+            Text = text,
+            Foreground = OverlayPalette.Brush(MediaColor.FromRgb(0x0A, 0x0C, 0x10)),
+            Background = OverlayPalette.Brush(color, 0xCC),
+            FontSize = 10,
+            FontWeight = FontWeights.SemiBold,
+            Padding = new Thickness(3, 0, 3, 1),
+        };
+        Canvas.SetLeft(label, x);
+        Canvas.SetTop(label, Math.Max(0, y - 13));
+        canvas.Children.Add(label);
+    }
+
+    private static string FormatAmount(long? amount, string? raw)
+    {
+        if (amount is long value)
+        {
+            return value.ToString("N0", CultureInfo.InvariantCulture);
+        }
+
+        if (!string.IsNullOrWhiteSpace(raw))
+        {
+            return $"? ({raw})";
+        }
+
+        return "-";
     }
 
     [DllImport("user32.dll")]

@@ -1,6 +1,6 @@
 using Poker.Advisor.Core.Enums;
 
-namespace Poker.Advisor.Core.Models;
+namespace Poker.Advisor.Core.Classes;
 
 public sealed record PanelSpan(string Text, PanelTone Tone = PanelTone.Normal);
 

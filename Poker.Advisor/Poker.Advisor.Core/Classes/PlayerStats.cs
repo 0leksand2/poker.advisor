@@ -1,6 +1,6 @@
 using Poker.Advisor.Core.Enums;
 
-namespace Poker.Advisor.Core.Models;
+namespace Poker.Advisor.Core.Classes;
 
 /// <summary>
 /// Session HUD-style stats for a tracked nickname.
@@ -97,15 +97,4 @@ public sealed class PlayerStats
         PlayerStyle.TightPassive => PanelTone.StyleAggroMin,
         _ => PanelTone.Normal,
     };
-}
-
-public enum PlayerStyle
-{
-    Unknown,
-    LooseAggressive,
-    CallingStation,
-    TightAggressive,
-    TightPassive,
-    Aggressive,
-    Passive,
 }

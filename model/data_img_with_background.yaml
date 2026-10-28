@@ -1,7 +1,7 @@
 path: D:\projects\poker\model\yolo_dataset_img_with_background
 train: images/train
 val: images/val
-nc: 58
+nc: 69
 names:
 - AS
 - AC
@@ -61,3 +61,14 @@ names:
 - fold_player
 - pot
 - bet
+- nickname
+- bank
+- fold_btn
+- call_btn
+- raise_btn
+- check_btn
+- check_fold_btn
+- 33_p_pot
+- 50_p_pot
+- 75_p_pot
+- 100_p_pot

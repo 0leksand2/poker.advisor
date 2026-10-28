@@ -1,4 +1,4 @@
-namespace Poker.Advisor.Core.Models;
+namespace Poker.Advisor.Core.Classes;
 
 public sealed record Detection(
     string Name,

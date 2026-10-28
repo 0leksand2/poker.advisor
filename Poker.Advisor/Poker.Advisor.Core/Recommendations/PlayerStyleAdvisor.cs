@@ -1,5 +1,5 @@
 using Poker.Advisor.Core.Enums;
-using Poker.Advisor.Core.Models;
+using Poker.Advisor.Core.Classes;
 using Poker.Advisor.Core.Recommendations.Postflop;
 
 namespace Poker.Advisor.Core.Recommendations;
@@ -56,9 +56,16 @@ public static class PlayerStyleAdvisor
                 && advice.Action == RecommendedAction.Check
                 && state.Street != PokerStreet.Preflop)
             {
-                var size = spot.SuggestBetSize(large: villain.Style == PlayerStyle.CallingStation);
+                var size = spot.SuggestBetSize(
+                    large: villain.Style == PlayerStyle.CallingStation,
+                    strongValue: true);
                 if (size is long betTo)
                 {
+                    var cover = spot.Stacks.EffectiveStack > 0
+                        && betTo >= spot.Stacks.EffectiveStack * 0.9;
+                    var note = cover
+                        ? $"value vs {tag} · cover {betTo:N0}"
+                        : $"value vs {tag} · bet {betTo:N0}";
                     return new HeroRecommendation
                     {
                         Street = advice.Street,
@@ -67,8 +74,8 @@ public static class PlayerStyleAdvisor
                         Position = advice.Position,
                         FacingBet = null,
                         RaiseToAmount = betTo,
-                        Summary = WithSummary(advice.Summary, $"value vs {tag} · bet {betTo:N0}"),
-                        Detail = $"Thin value vs {villain.StyleLabel} ({villain.ShortHud}).",
+                        Summary = WithSummary(advice.Summary, note),
+                        Detail = $"Thin value vs {villain.StyleLabel} ({villain.ShortHud}), stack-aware.",
                     };
                 }
             }

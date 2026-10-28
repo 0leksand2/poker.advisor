@@ -1,5 +1,5 @@
 using Poker.Advisor.Core.Enums;
-using Poker.Advisor.Core.Models;
+using Poker.Advisor.Core.Classes;
 
 namespace Poker.Advisor.Core.Recommendations.Postflop;
 
@@ -16,6 +16,7 @@ public sealed class PostflopSituation
     public required bool FacingAggression { get; init; }
     public required double BetPotRatio { get; init; }
     public PlayerSeatState? Aggressor { get; init; }
+    public required StackAwareSizing.Context Stacks { get; init; }
 
     public static PostflopSituation FromTable(TableState state)
     {
@@ -41,6 +42,7 @@ public sealed class PostflopSituation
         var pot = state.PotAmount;
         var ratio = pot is long p and > 0 ? call / (double)p : 0;
         var facingAggression = call > 0;
+        var stacks = StackAwareSizing.Analyze(state);
 
         return new PostflopSituation
         {
@@ -52,40 +54,48 @@ public sealed class PostflopSituation
             FacingAggression = facingAggression,
             BetPotRatio = ratio,
             Aggressor = aggressor,
+            Stacks = stacks,
         };
     }
 
-    public long? SuggestBetSize(bool large = false)
+    public long? SuggestBetSize(bool large = false, bool strongValue = false)
     {
+        long? raw = null;
         if (Pot is long pot and > 0)
         {
             var fraction = large ? 0.75 : 0.50;
-            return Math.Max(1, (long)Math.Round(pot * fraction));
-        }
+            // Deep SPR: keep thin value smaller so medium hands don't over-commit.
+            if (!strongValue && Stacks.Spr is double spr && spr >= 8)
+            {
+                fraction = large ? 0.55 : 0.33;
+            }
 
-        if (FacingBet > 0)
+            raw = Math.Max(1, (long)Math.Round(pot * fraction));
+        }
+        else if (FacingBet > 0)
         {
-            return Math.Max(FacingBet * 2, FacingBet + Math.Max(1, FacingBet / 2));
+            raw = Math.Max(FacingBet * 2, FacingBet + Math.Max(1, FacingBet / 2));
         }
 
-        return null;
+        return StackAwareSizing.PreferCommitBet(raw, Stacks, strongValue);
     }
 
-    public long? SuggestRaiseTo()
+    public long? SuggestRaiseTo(bool strongValue = false)
     {
         if (FacingBet <= 0)
         {
-            return SuggestBetSize();
+            return SuggestBetSize(strongValue: strongValue);
         }
 
         // Standard raise ~3x bet, or pot-ish.
         var byFacing = (long)Math.Round(FacingBet * 3.0);
+        long raw = byFacing;
         if (Pot is long pot and > 0)
         {
             var byPot = FacingBet + pot;
-            return Math.Max(byFacing, byPot);
+            raw = Math.Max(byFacing, byPot);
         }
 
-        return byFacing;
+        return StackAwareSizing.PreferCommitRaiseTo(raw, Stacks, strongValue);
     }
 }

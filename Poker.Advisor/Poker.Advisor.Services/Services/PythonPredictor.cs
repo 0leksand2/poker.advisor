@@ -3,7 +3,7 @@ using System.IO;
 using System.Text;
 using System.Text.Json;
 
-using Poker.Advisor.Core.Models;
+using Poker.Advisor.Core.Classes;
 
 namespace Poker.Advisor.Services;
 

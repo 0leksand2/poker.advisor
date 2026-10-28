@@ -98,6 +98,16 @@ def box_color(name: str) -> tuple[int, int, int]:
         return (0, 0, 255)  # red
     if name == "dealer":
         return (0, 140, 255)  # orange
+    if name == "nickname":
+        return (255, 100, 180)  # magenta
+    if name == "bank":
+        return (120, 200, 80)  # green
+    if name in {"pot", "bet"}:
+        return (220, 220, 0)
+    if name.endswith("_btn"):
+        return (255, 80, 160)  # pink action buttons
+    if name.endswith("_p_pot"):
+        return (180, 120, 255)  # purple pot% buttons
     return (0, 220, 0)
 
 

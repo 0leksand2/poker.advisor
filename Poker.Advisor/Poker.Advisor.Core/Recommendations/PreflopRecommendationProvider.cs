@@ -1,6 +1,6 @@
 using System.Globalization;
 using Poker.Advisor.Core.Enums;
-using Poker.Advisor.Core.Models;
+using Poker.Advisor.Core.Classes;
 
 namespace Poker.Advisor.Core.Recommendations;
 
@@ -60,6 +60,24 @@ public sealed class PreflopRecommendationProvider : IStreetRecommendationProvide
                 };
             }
 
+            // Facing a shove / large commit: don't auto-call chart hands if price is awful.
+            if (StackAwareSizing.CallIsCommitting(sizing.Stacks, sizing.CallAmount, threshold: 0.35)
+                && sizing.BigBlind is long bb
+                && sizing.CallAmount > bb * 8)
+            {
+                return new HeroRecommendation
+                {
+                    Street = Street,
+                    Action = RecommendedAction.Fold,
+                    Hand = hand.Notation,
+                    Position = state.HeroPosition,
+                    FacingBet = sizing.FacingBet > 0 ? sizing.FacingBet : null,
+                    CallAmount = sizing.CallAmount > 0 ? sizing.CallAmount : null,
+                    Summary = $"{hand.Notation} from {chart.Label} · fold vs commit",
+                    Detail = "Defend chart is for opens; folding vs large commit with non-premium.",
+                };
+            }
+
             return new HeroRecommendation
             {
                 Street = Street,
@@ -89,6 +107,9 @@ public sealed class PreflopRecommendationProvider : IStreetRecommendationProvide
         }
 
         var raiseTo = PreflopBetSizing.SuggestRaiseTo(sizing, chartKey);
+        var covering = raiseTo is long rt
+            && sizing.Stacks.EffectiveStack > 0
+            && rt >= sizing.HeroBet + sizing.Stacks.EffectiveStack * 0.9;
         return new HeroRecommendation
         {
             Street = Street,
@@ -98,10 +119,12 @@ public sealed class PreflopRecommendationProvider : IStreetRecommendationProvide
             FacingBet = sizing.FacingBet > 0 ? sizing.FacingBet : null,
             CallAmount = sizing.CallAmount > 0 ? sizing.CallAmount : null,
             RaiseToAmount = raiseTo,
-            Summary = BuildRaiseSummary(hand.Notation, chart.Label, chart.Percent, sizing, raiseTo),
-            Detail = sizing.PotLooksUnopened
-                ? "Open-raise size from blinds / limps ahead."
-                : "Re-raise size ~3x the bet facing hero.",
+            Summary = BuildRaiseSummary(hand.Notation, chart.Label, chart.Percent, sizing, raiseTo, covering),
+            Detail = covering
+                ? "Short/effective stack shove — max pressure vs cover."
+                : sizing.PotLooksUnopened
+                    ? "Open-raise size from blinds / limps ahead (stack-capped)."
+                    : "Re-raise size ~3x facing (stack-capped).",
         };
     }
 
@@ -110,7 +133,8 @@ public sealed class PreflopRecommendationProvider : IStreetRecommendationProvide
         string label,
         double percent,
         PreflopBetSizing.Context sizing,
-        long? raiseTo)
+        long? raiseTo,
+        bool covering)
     {
         var parts = new List<string>
         {
@@ -125,7 +149,7 @@ public sealed class PreflopRecommendationProvider : IStreetRecommendationProvide
 
         if (raiseTo is long to)
         {
-            parts.Add($"to {Format(to)}");
+            parts.Add(covering ? $"shove {Format(to)}" : $"to {Format(to)}");
         }
 
         return string.Join(" · ", parts);

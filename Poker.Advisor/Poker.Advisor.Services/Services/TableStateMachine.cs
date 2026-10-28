@@ -1,6 +1,6 @@
 using Poker.Advisor.Core.Enums;
 using Poker.Advisor.Core.Extensions;
-using Poker.Advisor.Core.Models;
+using Poker.Advisor.Core.Classes;
 
 namespace Poker.Advisor.Services;
 

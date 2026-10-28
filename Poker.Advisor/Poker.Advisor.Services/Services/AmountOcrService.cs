@@ -9,7 +9,7 @@ using Windows.Storage.Streams;
 
 using Poker.Advisor.Core.Enums;
 using Poker.Advisor.Core.Extensions;
-using Poker.Advisor.Core.Models;
+using Poker.Advisor.Core.Classes;
 
 namespace Poker.Advisor.Services;
 
@@ -42,8 +42,10 @@ public sealed class AmountOcrService : IDisposable
             return;
         }
 
-        var pots = detections.Where(d => d.Name.Equals("pot", StringComparison.OrdinalIgnoreCase)).ToList();
-        var bets = detections.Where(d => d.Name.Equals("bet", StringComparison.OrdinalIgnoreCase)).ToList();
+        var pots = detections.Where(d => d.IsPot()).ToList();
+        var bets = detections.Where(d => d.IsBet()).ToList();
+        var nicknames = detections.Where(d => d.IsNickname()).ToList();
+        var banks = detections.Where(d => d.IsBank()).ToList();
 
         foreach (var table in tables)
         {
@@ -55,8 +57,8 @@ public sealed class AmountOcrService : IDisposable
                 continue;
             }
 
-            await EnrichBanksAsync(table, screenshot, cancellationToken).ConfigureAwait(false);
-            await EnrichNicknamesAsync(table, screenshot, cancellationToken).ConfigureAwait(false);
+            await EnrichBanksAsync(table, banks, screenshot, cancellationToken).ConfigureAwait(false);
+            await EnrichNicknamesAsync(table, nicknames, screenshot, cancellationToken).ConfigureAwait(false);
             await EnrichBetsAsync(table, bets, screenshot, cancellationToken).ConfigureAwait(false);
         }
     }
@@ -165,15 +167,39 @@ public sealed class AmountOcrService : IDisposable
 
     private async Task EnrichBanksAsync(
         TableState table,
+        List<Detection> allBanks,
         Bitmap screenshot,
         CancellationToken cancellationToken)
     {
-        foreach (var player in table.PlayersClockwiseFromHero)
+        var players = table.PlayersClockwiseFromHero;
+        if (players.Count == 0)
+        {
+            return;
+        }
+
+        var maxDist = Math.Max(table.Table.Width(), table.Table.Height()) * 0.28;
+        var tableBanks = allBanks
+            .Where(b => table.Table.CenterInside(b) || table.Table.DistanceTo(b) <= maxDist * 1.4)
+            .ToList();
+        var assigned = AssignBoxesToPlayers(tableBanks, players, maxDist);
+
+        foreach (var player in players)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            // OCR strictly below the nameplate divider so nickname digits (sigma-2000) are excluded.
-            var region = ResolveBankOcrRegion(player.BankRegion, screenshot);
+            Detection region;
+            if (assigned.TryGetValue(player, out var bankBox))
+            {
+                // YOLO bank box is already the stack amount ROI.
+                region = bankBox;
+                player.BankRegion = bankBox;
+            }
+            else
+            {
+                // Fallback: nameplate heuristic under player / hero cards.
+                region = ResolveBankOcrRegion(player.BankRegion, screenshot);
+            }
+
             using var crop = CropRegion(screenshot, region, pad: 2, minWidth: 220, minHeight: 48, scale: 4);
             using var boosted = BoostForOcr(crop);
             var raw = await RecognizeAsync(boosted).ConfigureAwait(false);
@@ -184,14 +210,39 @@ public sealed class AmountOcrService : IDisposable
 
     private async Task EnrichNicknamesAsync(
         TableState table,
+        List<Detection> allNicknames,
         Bitmap screenshot,
         CancellationToken cancellationToken)
     {
-        foreach (var player in table.PlayersClockwiseFromHero)
+        var players = table.PlayersClockwiseFromHero;
+        if (players.Count == 0)
+        {
+            return;
+        }
+
+        var maxDist = Math.Max(table.Table.Width(), table.Table.Height()) * 0.28;
+        var tableNicks = allNicknames
+            .Where(n => table.Table.CenterInside(n) || table.Table.DistanceTo(n) <= maxDist * 1.4)
+            .ToList();
+
+        // Prefer YOLO nickname boxes: closest unused box to each seat.
+        var assigned = AssignBoxesToPlayers(tableNicks, players, maxDist);
+
+        foreach (var player in players)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var region = ResolveNicknameOcrRegion(player.BankRegion, screenshot);
+            Detection region;
+            if (assigned.TryGetValue(player, out var nickBox))
+            {
+                region = nickBox;
+            }
+            else
+            {
+                // Fallback: old nameplate heuristic when nickname class is missing.
+                region = ResolveNicknameOcrRegion(player.BankRegion, screenshot);
+            }
+
             using var crop = CropRegion(screenshot, region, pad: 2, minWidth: 200, minHeight: 36, scale: 3);
             var raw = await RecognizeAsync(crop).ConfigureAwait(false);
             player.NicknameRawText = raw;
@@ -201,6 +252,51 @@ public sealed class AmountOcrService : IDisposable
                 player.Nickname = parsed;
             }
         }
+    }
+
+    private static Dictionary<PlayerSeatState, Detection> AssignBoxesToPlayers(
+        IReadOnlyList<Detection> boxes,
+        IReadOnlyList<PlayerSeatState> players,
+        double maxDist)
+    {
+        var pairs = new List<(Detection Box, PlayerSeatState Player, double Dist)>();
+        foreach (var box in boxes)
+        {
+            PlayerSeatState? best = null;
+            var bestDist = double.MaxValue;
+            foreach (var player in players)
+            {
+                var dist = player.Detection.DistanceTo(box);
+                // Hero bank ROI is under cards; also allow distance to bank region.
+                var bankDist = player.BankRegion.DistanceTo(box);
+                dist = Math.Min(dist, bankDist);
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    best = player;
+                }
+            }
+
+            if (best is not null && bestDist <= maxDist)
+            {
+                pairs.Add((box, best, bestDist));
+            }
+        }
+
+        var usedBoxes = new HashSet<Detection>();
+        var usedPlayers = new HashSet<PlayerSeatState>();
+        var result = new Dictionary<PlayerSeatState, Detection>();
+        foreach (var pair in pairs.OrderBy(p => p.Dist))
+        {
+            if (!usedBoxes.Add(pair.Box) || !usedPlayers.Add(pair.Player))
+            {
+                continue;
+            }
+
+            result[pair.Player] = pair.Box;
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -886,16 +982,5 @@ public sealed class AmountOcrService : IDisposable
         }
 
         return a + " | " + b;
-    }
-}
-
-public static class BitmapPngExtensions
-{
-    public static MemoryStream SaveToPngStream(this Bitmap bitmap)
-    {
-        var stream = new MemoryStream();
-        bitmap.Save(stream, ImageFormat.Png);
-        stream.Position = 0;
-        return stream;
     }
 }

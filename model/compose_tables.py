@@ -7,15 +7,20 @@ into the composite canvas coordinates.
 Usage:
   python model/compose_tables.py
   python model/compose_tables.py --count 15000
+  python model/compose_tables.py --count 3000 --workers 8
 """
 
 from __future__ import annotations
 
 import argparse
 import math
+import os
 import random
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 
 import cv2
 import numpy as np
@@ -28,6 +33,17 @@ OUTPUT_IMAGES_DIR = ROOT / "dataset" / "images_with_background"
 OUTPUT_LABELS_DIR = ROOT / "dataset" / "YOLO_Annotations_full_screen"
 CLASSES_FILE = ROOT / "dataset" / "classes.txt"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+# Shared read-only inputs for worker threads (set in main before pool starts).
+_SOURCES: list[tuple[np.ndarray, list[tuple[str, float, float, float, float]], int, int, str]] = []
+_BACKGROUNDS: list[tuple[np.ndarray, str]] = []
+_TABLE_CLASS_ID = 0
+_MARGIN = 8
+_MIN_TABLES = 1
+_MAX_TABLES = 6
+_OUT_IMAGES = OUTPUT_IMAGES_DIR
+_OUT_LABELS = OUTPUT_LABELS_DIR
+_PRINT_LOCK = Lock()
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,6 +64,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--copies", type=int, default=1, help="Composites per background when --count is not set")
     parser.add_argument("--margin", type=int, default=8, help="Minimum gap between pasted images")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, min(8, (os.cpu_count() or 4))),
+        help="Parallel worker threads (default: min(8, CPU count))",
+    )
     return parser.parse_args()
 
 
@@ -224,7 +246,6 @@ def transform_box(
 
 
 def full_table_box(paste: tuple[int, int, int, int], canvas_w: int, canvas_h: int, table_id: int) -> str:
-    px, py, pw, ph = paste
     return transform_box((str(table_id), 0.5, 0.5, 1.0, 1.0), 1, 1, paste, canvas_w, canvas_h) or ""
 
 
@@ -240,17 +261,103 @@ def clear_folder(folder: Path) -> None:
     folder.mkdir(parents=True, exist_ok=True)
 
 
+@dataclass(frozen=True)
+class ComposeJob:
+    """One output pair: image stem is unique and matches the label file stem."""
+
+    index: int  # 0-based
+    stem: str
+    seed: int
+
+
+def compose_one(job: ComposeJob) -> tuple[int, str, int, int]:
+    """Build one composite. Returns (index, stem, table_count, box_count)."""
+    rng = random.Random(job.seed)
+    background, _bg_stem = _BACKGROUNDS[rng.randrange(len(_BACKGROUNDS))]
+    canvas_h, canvas_w = background.shape[:2]
+
+    table_count = rng.randint(_MIN_TABLES, min(_MAX_TABLES, len(_SOURCES)))
+    chosen_idx = rng.sample(range(len(_SOURCES)), k=table_count)
+    chosen = [_SOURCES[i] for i in chosen_idx]
+    place_sources = [(Path(stem), src_w, src_h) for _, _, src_w, src_h, stem in chosen]
+    rects = place_tables(place_sources, canvas_w, canvas_h, _MARGIN, rng)
+    if rects is None:
+        rects = place_tables_grid(place_sources, canvas_w, canvas_h, _MARGIN, rng)
+
+    canvas = background.copy()
+    lines: list[str] = []
+    for (image, boxes, src_w, src_h, _stem), rect in zip(chosen, rects):
+        paste_image(canvas, image, rect)
+        has_table = any(int(box[0]) == _TABLE_CLASS_ID for box in boxes)
+        for box in boxes:
+            transformed = transform_box(box, src_w, src_h, rect, canvas_w, canvas_h)
+            if transformed:
+                lines.append(transformed)
+        if not has_table:
+            synthetic = full_table_box(rect, canvas_w, canvas_h, _TABLE_CLASS_ID)
+            if synthetic:
+                lines.append(synthetic)
+
+    image_path = _OUT_IMAGES / f"{job.stem}.png"
+    label_path = _OUT_LABELS / f"{job.stem}.txt"
+    # compression 1: fast write, still small enough for training datasets
+    cv2.imwrite(str(image_path), canvas, [int(cv2.IMWRITE_PNG_COMPRESSION), 1])
+    label_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    return job.index, job.stem, table_count, len(lines)
+
+
+def build_jobs(total: int, backgrounds: list[tuple[np.ndarray, str]], args: argparse.Namespace) -> list[ComposeJob]:
+    """
+    Pre-assign unique stems so image N always pairs with label N.
+    When --count is set: stems are 1..total.
+    Otherwise: one (or copies) per background, still unique via index suffix if needed.
+    """
+    base_seed = args.seed if args.seed is not None else random.randint(0, 2**31 - 1)
+    jobs: list[ComposeJob] = []
+
+    if args.count is not None:
+        for index in range(total):
+            jobs.append(ComposeJob(index=index, stem=str(index + 1), seed=base_seed + index + 1))
+        return jobs
+
+    # count is None: walk backgrounds × copies with unique stems
+    index = 0
+    for copy_i in range(args.copies):
+        for bg_i, (_bg, bg_stem) in enumerate(backgrounds):
+            if args.copies == 1:
+                stem = bg_stem
+            else:
+                stem = f"{bg_stem}_{copy_i + 1}"
+            # Guard uniqueness if background stems collide
+            if any(j.stem == stem for j in jobs):
+                stem = f"{stem}_{index + 1}"
+            jobs.append(ComposeJob(index=index, stem=stem, seed=base_seed + index + 1))
+            index += 1
+    return jobs
+
+
 def main() -> None:
+    global _SOURCES, _BACKGROUNDS, _TABLE_CLASS_ID, _MARGIN, _MIN_TABLES, _MAX_TABLES
+    global _OUT_IMAGES, _OUT_LABELS
+
     args = parse_args()
     if args.min_tables < 1 or args.max_tables < args.min_tables:
         raise ValueError("--min-tables / --max-tables are invalid")
+    if args.workers < 1:
+        raise ValueError("--workers must be >= 1")
 
     tables_dir = Path(args.tables)
     labels_dir = Path(args.table_labels)
     backgrounds_dir = Path(args.backgrounds)
     out_images = Path(args.output_images)
     out_labels = Path(args.output_labels)
-    table_id = load_table_class_id()
+
+    _TABLE_CLASS_ID = load_table_class_id()
+    _MARGIN = args.margin
+    _MIN_TABLES = args.min_tables
+    _MAX_TABLES = args.max_tables
+    _OUT_IMAGES = out_images
+    _OUT_LABELS = out_labels
 
     backgrounds = list_images(backgrounds_dir)
     if not backgrounds:
@@ -283,56 +390,48 @@ def main() -> None:
     if total < 1:
         raise ValueError("--count must be at least 1")
 
-    rng = random.Random(args.seed)
-    deck: list[int] = []
+    _SOURCES = sources
+    _BACKGROUNDS = loaded_backgrounds
+
     clear_folder(out_images)
     clear_folder(out_labels)
 
+    jobs = build_jobs(total, loaded_backgrounds, args)
+    workers = min(args.workers, len(jobs))
+    print(f"Composing {len(jobs)} images with {workers} worker(s)...")
+
     written = 0
-    for index in range(total):
-        background, background_stem = loaded_backgrounds[rng.randrange(len(loaded_backgrounds))]
-        canvas_h, canvas_w = background.shape[:2]
-        table_count = rng.randint(args.min_tables, min(args.max_tables, len(sources)))
-        if len(deck) < table_count:
-            refill = [i for i in range(len(sources)) if i not in deck]
-            rng.shuffle(refill)
-            deck.extend(refill)
-        chosen = [sources[deck.pop()] for _ in range(table_count)]
-        place_sources = [(Path(stem), src_w, src_h) for _, _, src_w, src_h, stem in chosen]
-        rects = place_tables(place_sources, canvas_w, canvas_h, args.margin, rng)
-        if rects is None:
-            rects = place_tables_grid(place_sources, canvas_w, canvas_h, args.margin, rng)
+    if workers == 1:
+        for job in jobs:
+            _index, stem, table_count, box_count = compose_one(job)
+            written += 1
+            if written == 1 or written % 500 == 0 or written == len(jobs):
+                print(f"{written}/{len(jobs)} {stem}.png | {table_count} tables, {box_count} boxes")
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(compose_one, job) for job in jobs]
+            for fut in as_completed(futures):
+                _index, stem, table_count, box_count = fut.result()
+                written += 1
+                if written == 1 or written % 500 == 0 or written == len(jobs):
+                    with _PRINT_LOCK:
+                        print(f"{written}/{len(jobs)} {stem}.png | {table_count} tables, {box_count} boxes")
 
-        canvas = background.copy()
-        lines: list[str] = []
-        for (image, boxes, src_w, src_h, _stem), rect in zip(chosen, rects):
-            paste_image(canvas, image, rect)
-            has_table = any(int(box[0]) == table_id for box in boxes)
-            for box in boxes:
-                transformed = transform_box(box, src_w, src_h, rect, canvas_w, canvas_h)
-                if transformed:
-                    lines.append(transformed)
-            if not has_table:
-                synthetic = full_table_box(rect, canvas_w, canvas_h, table_id)
-                if synthetic:
-                    lines.append(synthetic)
-
-        if args.count is None and args.copies == 1:
-            stem = background_stem
-        elif args.count is None:
-            stem = f"{background_stem}_{index + 1}"
-        else:
-            stem = str(index + 1)
-        image_path = out_images / f"{stem}.png"
-        label_path = out_labels / f"{stem}.txt"
-        cv2.imwrite(str(image_path), canvas, [int(cv2.IMWRITE_PNG_COMPRESSION), 1])
-        label_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-        written += 1
-        if written == 1 or written % 500 == 0 or written == total:
-            print(f"{written}/{total} {image_path.name} | {table_count} tables, {len(lines)} boxes")
+    # Sanity: every image has a matching label with the same stem.
+    image_stems = {p.stem for p in out_images.glob("*.png")}
+    label_stems = {p.stem for p in out_labels.glob("*.txt")}
+    missing_labels = sorted(image_stems - label_stems)
+    missing_images = sorted(label_stems - image_stems)
+    if missing_labels or missing_images:
+        raise RuntimeError(
+            f"Stem mismatch after compose: "
+            f"{len(missing_labels)} images without labels, "
+            f"{len(missing_images)} labels without images"
+        )
 
     print(f"Done. {written} composites in {out_images}")
     print(f"Labels: {out_labels}")
+    print(f"Verified {len(image_stems)} matched image/label pairs")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 using System.Globalization;
 using Poker.Advisor.Core.Enums;
-using Poker.Advisor.Core.Models;
+using Poker.Advisor.Core.Classes;
 
 namespace Poker.Advisor.Core.Recommendations.Postflop;
 
@@ -69,6 +69,8 @@ public sealed class PostflopRecommendationProvider : IStreetRecommendationProvid
         var heavy = spot.BetPotRatio >= 0.75;
         var street = Street;
 
+        var committing = StackAwareSizing.CallIsCommitting(spot.Stacks, spot.CallAmount);
+
         // Monsters / two pair+ : raise for value (call huge multiway river bets).
         if (hand.Category >= HandCategory.TwoPairOrSet)
         {
@@ -77,7 +79,7 @@ public sealed class PostflopRecommendationProvider : IStreetRecommendationProvid
                 return Call(starting, hand, spot, "strong made · call heavy multiway");
             }
 
-            return Raise(starting, hand, spot, "value raise");
+            return Raise(starting, hand, spot, "value raise", strongValue: true);
         }
 
         // Top pair / overpair
@@ -93,7 +95,13 @@ public sealed class PostflopRecommendationProvider : IStreetRecommendationProvid
                 return Call(starting, hand, spot, "top pair · river call");
             }
 
-            if (!multiway && street != PokerStreet.River && spot.BetPotRatio <= 0.55)
+            // Deep / committing: don't raise-thin for stacks; just call.
+            if (committing && street == PokerStreet.River)
+            {
+                return Call(starting, hand, spot, "top pair · call commit");
+            }
+
+            if (!multiway && street != PokerStreet.River && spot.BetPotRatio <= 0.55 && !committing)
             {
                 return Raise(starting, hand, spot, "top pair · raise thin");
             }
@@ -103,7 +111,7 @@ public sealed class PostflopRecommendationProvider : IStreetRecommendationProvid
 
         if (hand.Category == HandCategory.TopPairWeak)
         {
-            if (heavy || (multiway && street == PokerStreet.River))
+            if (heavy || committing || (multiway && street == PokerStreet.River))
             {
                 return Fold(starting, hand, spot, "weak top pair · fold to pressure");
             }
@@ -115,14 +123,19 @@ public sealed class PostflopRecommendationProvider : IStreetRecommendationProvid
         if (street != PokerStreet.River && hand.IsPlayableDraw)
         {
             var combo = hand.HasFlushDraw && hand.HasOpenEndedStraightDraw;
-            if (combo && !heavy)
+            if (combo && !heavy && !committing)
             {
                 return Raise(starting, hand, spot, "combo draw · semi-bluff");
             }
 
-            if (spot.BetPotRatio <= 0.70 || hand.HasFlushDraw)
+            if ((spot.BetPotRatio <= 0.70 || hand.HasFlushDraw) && !committing)
             {
                 return Call(starting, hand, spot, "draw · call");
+            }
+
+            if (committing && !combo)
+            {
+                return Fold(starting, hand, spot, "draw · too committing");
             }
 
             return Fold(starting, hand, spot, "draw · too expensive");
@@ -130,7 +143,7 @@ public sealed class PostflopRecommendationProvider : IStreetRecommendationProvid
 
         if (hand.Category is HandCategory.MiddlePair or HandCategory.WeakPair)
         {
-            if (heavy || multiway || street == PokerStreet.River)
+            if (heavy || committing || multiway || street == PokerStreet.River)
             {
                 return Fold(starting, hand, spot, "weak pair · fold");
             }
@@ -145,7 +158,7 @@ public sealed class PostflopRecommendationProvider : IStreetRecommendationProvid
 
         if (hand.Category is HandCategory.WeakShowdown or HandCategory.WeakDraw)
         {
-            if (!heavy && street == PokerStreet.Flop && spot.BetPotRatio <= 0.35 && spot.ActiveOpponents == 1)
+            if (!heavy && !committing && street == PokerStreet.Flop && spot.BetPotRatio <= 0.35 && spot.ActiveOpponents == 1)
             {
                 return Call(starting, hand, spot, "float / weak equity");
             }
@@ -165,12 +178,18 @@ public sealed class PostflopRecommendationProvider : IStreetRecommendationProvid
 
         if (hand.Category >= HandCategory.TwoPairOrSet)
         {
-            return Bet(starting, hand, spot, "value bet", large: multiway || Street == PokerStreet.River);
+            return Bet(
+                starting,
+                hand,
+                spot,
+                "value bet",
+                large: multiway || Street == PokerStreet.River,
+                strongValue: true);
         }
 
         if (hand.Category == HandCategory.TopPairGood)
         {
-            return Bet(starting, hand, spot, "value / protect", large: multiway);
+            return Bet(starting, hand, spot, "value / protect", large: multiway, strongValue: true);
         }
 
         if (hand.Category == HandCategory.TopPairWeak)
@@ -216,9 +235,10 @@ public sealed class PostflopRecommendationProvider : IStreetRecommendationProvid
         PostflopHandAssessment hand,
         PostflopSituation spot,
         string why,
-        bool large)
+        bool large,
+        bool strongValue = false)
     {
-        var size = spot.SuggestBetSize(large);
+        var size = spot.SuggestBetSize(large, strongValue);
         return new HeroRecommendation
         {
             Street = Street,
@@ -228,7 +248,7 @@ public sealed class PostflopRecommendationProvider : IStreetRecommendationProvid
             FacingBet = null,
             CallAmount = null,
             Summary = FormatSummary(starting, hand, spot, why, size, isBet: true),
-            Detail = "Postflop value/semi-bluff bet from hand class + board.",
+            Detail = "Postflop value/semi-bluff bet from hand class + board + stacks.",
         };
     }
 
@@ -236,9 +256,10 @@ public sealed class PostflopRecommendationProvider : IStreetRecommendationProvid
         string starting,
         PostflopHandAssessment hand,
         PostflopSituation spot,
-        string why)
+        string why,
+        bool strongValue = false)
     {
-        var to = spot.SuggestRaiseTo();
+        var to = spot.SuggestRaiseTo(strongValue);
         return new HeroRecommendation
         {
             Street = Street,
@@ -248,7 +269,7 @@ public sealed class PostflopRecommendationProvider : IStreetRecommendationProvid
             FacingBet = spot.FacingBet > 0 ? spot.FacingBet : null,
             CallAmount = spot.CallAmount > 0 ? spot.CallAmount : null,
             Summary = FormatSummary(starting, hand, spot, why, to, isBet: false),
-            Detail = "Postflop raise vs opponent bet.",
+            Detail = "Postflop raise vs opponent bet (stack-capped).",
         };
     }
 
@@ -331,6 +352,17 @@ public sealed class PostflopRecommendationProvider : IStreetRecommendationProvid
         if (size is long s)
         {
             parts.Add(isBet ? $"bet {Format(s)}" : $"to {Format(s)}");
+        }
+
+        if (spot.Stacks.EffectiveStack > 0
+            && size is long sized
+            && sized >= spot.Stacks.EffectiveStack * 0.9)
+        {
+            parts.Add("cover");
+        }
+        else if (spot.Stacks.Spr is double spr)
+        {
+            parts.Add($"SPR {spr:0.#}");
         }
 
         return string.Join(" · ", parts);

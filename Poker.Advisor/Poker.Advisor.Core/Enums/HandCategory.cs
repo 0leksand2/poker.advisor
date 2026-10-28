@@ -1,4 +1,4 @@
-namespace Poker.Advisor.Core.Recommendations.Postflop;
+namespace Poker.Advisor.Core.Enums;
 
 /// <summary>
 /// Coarse postflop hand classes used for action heuristics.

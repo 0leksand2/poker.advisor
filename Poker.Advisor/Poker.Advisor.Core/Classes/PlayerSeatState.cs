@@ -1,15 +1,15 @@
 using Poker.Advisor.Core.Enums;
 
-namespace Poker.Advisor.Core.Models;
+namespace Poker.Advisor.Core.Classes;
 
 public sealed class PlayerSeatState
 {
     public required Detection Detection { get; init; }
 
     /// <summary>
-    /// Region used to OCR the stack/bank (bottom of player title, or under hero cards).
+    /// Region used to OCR the stack/bank (YOLO bank box, player title, or under hero cards).
     /// </summary>
-    public required Detection BankRegion { get; init; }
+    public required Detection BankRegion { get; set; }
 
     public required PlayerStatus Status { get; init; }
     public required string Position { get; init; }

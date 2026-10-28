@@ -1,5 +1,5 @@
 using Poker.Advisor.Core.Enums;
-using Poker.Advisor.Core.Models;
+using Poker.Advisor.Core.Classes;
 
 namespace Poker.Advisor.Core.Recommendations;
 
@@ -15,7 +15,8 @@ public static class PreflopBetSizing
         long CallAmount,
         bool PotLooksUnopened,
         int BlindSizedBets,
-        PlayerSeatState? FacingPlayer);
+        PlayerSeatState? FacingPlayer,
+        StackAwareSizing.Context Stacks);
 
     public static Context Analyze(TableState state)
     {
@@ -39,12 +40,22 @@ public static class PreflopBetSizing
         var callAmount = Math.Max(0, facing - heroBet);
         var blindSized = CountBlindSizedBets(players, bigBlind);
         var potLooksUnopened = IsUnopened(facing, bigBlind);
+        var stacks = StackAwareSizing.Analyze(state);
 
-        return new Context(bigBlind, facing, heroBet, callAmount, potLooksUnopened, blindSized, facingPlayer);
+        return new Context(
+            bigBlind,
+            facing,
+            heroBet,
+            callAmount,
+            potLooksUnopened,
+            blindSized,
+            facingPlayer,
+            stacks);
     }
 
     public static long? SuggestRaiseTo(Context ctx, string? heroPositionChartKey)
     {
+        long? raw;
         if (ctx.BigBlind is long bb and > 0 && ctx.PotLooksUnopened)
         {
             // Standard open: 2.5bb; SB open a bit larger (~3bb).
@@ -58,23 +69,28 @@ public static class PreflopBetSizing
             {
                 // SB + BB + at least one limp.
                 var limpers = ctx.BlindSizedBets - 2;
-                return (long)Math.Round(bb * (3.5 + 0.5 * Math.Max(0, limpers - 1)));
+                raw = (long)Math.Round(bb * (3.5 + 0.5 * Math.Max(0, limpers - 1)));
             }
-
-            return Math.Max(openTo, ctx.FacingBet + bb);
+            else
+            {
+                raw = Math.Max(openTo, ctx.FacingBet + bb);
+            }
         }
-
-        if (ctx.FacingBet > 0)
+        else if (ctx.FacingBet > 0)
         {
-            // 3-bet / re-raise: about 3x the bet hero is facing.
+            // 3-bet / re-raise: about 3x the bet facing hero.
             var threeBet = (long)Math.Round(ctx.FacingBet * 3.0);
             var minUp = ctx.FacingBet + (ctx.BigBlind ?? Math.Max(1, ctx.FacingBet / 2));
-            return Math.Max(threeBet, minUp);
+            raw = Math.Max(threeBet, minUp);
+        }
+        else
+        {
+            raw = ctx.BigBlind is long blind and > 0
+                ? (long)Math.Round(blind * 2.5)
+                : null;
         }
 
-        return ctx.BigBlind is long blind and > 0
-            ? (long)Math.Round(blind * 2.5)
-            : null;
+        return StackAwareSizing.PreferShortStackShove(raw, ctx.Stacks, ctx.BigBlind);
     }
 
     private static long? InferBigBlind(IReadOnlyList<PlayerSeatState> players, long facingBet)
